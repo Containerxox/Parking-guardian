@@ -1,0 +1,174 @@
+/* ===== 전역 리셋 ===== */
+html, body, #root {
+  height: 100%;
+}
+body {
+  margin: 0;                     
+  font-family: 'Segoe UI', sans-serif;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* ===== 로그인 배경 ===== */
+.login-wrap {
+  min-height: 100vh;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #0f172a;
+  overflow: hidden;
+}
+
+.login-bg {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(1200px 600px at 20% 10%, rgba(143, 222, 233, 0.25), transparent 60%),
+    radial-gradient(1000px 500px at 80% 90%, rgba(143, 222, 233, 0.25), transparent 60%);
+  pointer-events: none;
+}
+
+/* ===== 로그인 카드 ===== */
+.login-card {
+  width: 100%;
+  max-width: 460px;
+  border-radius: 20px;
+  padding: 28px;
+  color: #e5e7eb;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+/* ===== 헤더 ===== */
+.login-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.logo-img {
+  width: 80px;
+  height: auto;
+  margin-bottom: 12px;
+  border-radius: 16px;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+}
+
+.title {
+  margin: 10px 0 0 0;
+  font-size: 28px;
+  font-weight: 800;
+  color: #ffffff;
+}
+.subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(229, 231, 235, 0.8);
+}
+
+/* ===== 폼 ===== */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 20px;
+}
+.label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  color: #cbd5e1;
+}
+
+/* ===== id, pw 입력 ===== */
+.input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.input:focus {
+  border-color: #8FDEE9;   /* 포커스 컬러 */
+  background: rgba(255, 255, 255, 0.14);
+}
+.input::placeholder {
+  color: rgba(226, 232, 240, 0.6);
+}
+
+.input-group {
+  position: relative;
+  width: 100%;
+}
+.input-has-button {
+  padding-right: 56px;
+}
+
+/* ===== 비밀번호 보기,숨김 버튼 ===== */
+.hidden-btn.show-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.12);
+  color: #e5e7eb;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+
+
+/* ===== 버튼 ===== */
+.main-login-btn {
+  margin-top: 11px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid #8FDEE9;
+  background: #8FDEE9;       /* 버튼 배경 민트 */
+  color: #0f172a;            /* 버튼 텍스트 */
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(143, 222, 233, 0.35);
+  transition: transform 0.05s ease, filter 0.15s ease;
+}
+.main-login-btn:hover {
+  filter: brightness(1.08);
+}
+.main-login-btn:active {
+  transform: translateY(1px);
+}
+
+/* ===== 에러 박스 ===== */
+.error-box {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fecaca;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+
+
+/* ===== 반응형 ===== */
+@media (max-width: 420px) {
+  .login-card { padding: 22px; }
+  .title { font-size: 24px; }
+}
+
