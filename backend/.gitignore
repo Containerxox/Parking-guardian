@@ -5,3 +5,12 @@ venv/
 
 # files
 .env
+
+# SQLite DB & 저널 파일
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+*.db-shm
+*.db-wal

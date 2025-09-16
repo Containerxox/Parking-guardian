@@ -1,14 +1,16 @@
 import React, { useState } from "react";
 import "./Login.css"; 
 import logo from "../../logo.png";
+import { useNavigate } from "react-router-dom";
 
 export default function Login() {
+  const navigate = useNavigate();
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
 
-  const onSubmit = (e) => {
+  const onSubmit = async (e) => {
     e.preventDefault(); // 페이지 새로고침 방지.
     setError("");
 
@@ -18,10 +20,28 @@ export default function Login() {
     }
 
     // 여기에 실제 로그인 API 연동 예정 !
-    // if (id === "admin") navigate("/admin"); else navigate("/user");
+    try {
+      const res = await fetch('http://localhost:5000/login', {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: id, password: pw }),
+      });
 
-    console.log({ id, pw });
-    alert("로그인 요청 전송(데모).\n콘솔에 입력한 id,pw 값 확인");
+      const data = await res.json();
+
+      if(data.ok){
+        const role=data.user.role;
+        // 응답받은 json에서 role이 admin이면 /admin-dashboard로 이동, user면 /user-dashboard로 이동
+        navigate(role === "admin" ? "/admin-dashboard" : "/user-dashboard"); 
+      }else{
+        setError(data.error);
+      }
+
+    } 
+    catch (err) {
+      // console.error("서버 오류:", err);
+      setError("서버와 연결할 수 없습니다.");
+    }
   };
 
   return (
