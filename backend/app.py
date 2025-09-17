@@ -20,8 +20,8 @@ def get_db():
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or {}
-    uid = (data.get("user_id") or "").strip()
-    pw = data.get("password") or ""
+    uid = data.get("user_id").strip()
+    pw = data.get("password")
 
     # 쿼리 실행
     with get_db() as conn:
@@ -33,7 +33,7 @@ def login():
     if not row:
         return jsonify({"ok": False, "error": "존재하지 않는 아이디입니다."}),200 # 보안을 위해 아이디/비밀번호 불일치로 바꿀 예정
     
-    # 비밀번호 해시 처리
+    # 해시 처리된 비밀번호를 bytes로 인코딩
     pw_hash = row["password_hash"]
     if isinstance(pw_hash,str):
         pw_hash = pw_hash.encode("utf-8")
@@ -47,6 +47,50 @@ def login():
         "ok": True,
         "user": {"id":row["id"], "user_id": row["user_id"],"role":row["role"]}
     }),200
+
+
+
+# /user-register API
+@app.post("/user-register")
+def register():
+    data = request.get_json(silent=True) or {}
+    uid = data.get("user_id").strip()
+    pw = data.get("password") 
+    building_name = data.get("building_name").strip()
+    building_addr = data.get("building_address").strip()
+
+    # 비밀번호 해시 처리
+    pw_hash = bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt())
+
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+
+            building_id = None
+            # 입력받은 건물명, 건물주소를 buildings 테이블에 삽입
+            cur.execute("INSERT INTO buildings(name, address) VALUES(?, ?)",(building_name,building_addr))
+            # 입력받은 건물명, 건물주소가 저장된 행을 조회하여 해당 행의 id 컬럼 값(=건물ID)을 가져옴
+            cur.execute("SELECT id FROM buildings WHERE name=? AND address=?", (building_name, building_addr))
+            row_b = cur.fetchone()
+            if not row_b:
+                return jsonify({"ok": False, "error": "건물 ID 조회에 실패했습니다."}),200
+            # 건물ID를 building_id 변수에 저장
+            building_id = row_b["id"] if row_b else None 
+            
+            # users 테이블에 ID, PW, 건물ID를 삽입
+            cur.execute("INSERT INTO users (user_id, password_hash, role, building_id) VALUES (?, ?, 'user', ?)",(uid,pw_hash, building_id))
+
+    except sqlite3.IntegrityError:
+        # users.user_id UNIQUE, buildings UNIQUE(name,address) 충돌 발생하는 경우
+        return jsonify({"ok": False, "error":"이미 존재하는 아이디 또는 건물입니다."}),200
+    
+    except Exception as e:
+        return jsonify({"ok":False, "error":"서버 오류"}),200
+    
+    return jsonify({"ok":True, "message": "회원가입이 완료되었습니다."})
+
+
+
 
 # 간단 루트
 @app.route("/", methods=["GET"])
