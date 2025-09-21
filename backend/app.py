@@ -1,20 +1,67 @@
 # app.py
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, session, g
 from flask_cors import CORS
-import sqlite3
-import bcrypt
+import sqlite3, bcrypt
+from functools import wraps
 
-# 내 DB의 저장 경로
-DB_PATH=r"C:\sqlite\parking_guardian.db" 
+# ====================================================================================================
+# 클라우드 (배포 용) DB 저장 경로
+# DB_PATH=r"backend\parking_guardian.db"
+# ====================================================================================================
+
+# 로컬 (개발 용) DB 저장 경
+DB_PATH=r"C:\sqlite\parking_guardian.db"
 
 app = Flask(__name__)
-CORS(app)
+app.secret_key = "capstone-team3-random" # 세션에 사용될 랜덤키 (나중에 환경변수로 관리할 예정)
+
+# 로컬 개발용 (Http) (front:3000 <-> back:5000) 
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax" # 교차사이트 요청엔 쿠키 전송 X
+app.config["SESSION_COOKIE_SECURE"] = False # HTTP에서는 쿠키 전송 X (HTTPS에서만 쿠키 전송 O)
+ALLOWED_ORIGINS = ["http://localhost:3000"] # Frontend 3000번 포트만 허용
+
+# ====================================================================================================
+# 클라우드 용 (Https) (front:3000 <-> back:5000) 
+# app.config["SESSION_COOKIE_SAMESITE"] = "None" #교차사이트 요청에도 쿠키 전송 O
+# app.config["SESSION_COOKIE_SECURE"] = True # HTTPS에서만 쿠키 전송 O
+# ALLOWED_ORIGINS = ["https://capston-bajen.run.goorm.site"]
+# ====================================================================================================
+
+CORS(
+    app, 
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
+    allow_headers=["Content-Type", "Authorization"], # 요청에서 허용할 헤더
+    methods=["POST","GET","OPTIONS"], # 허용할 메서드
+    supports_credentials=True, # 세션/쿠키 전송 허용
+    )
 
 # DB 연결
 def get_db():
     conn =sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# 로그인 여부 확인 (세션 확인)
+def require_login(f):
+    @wraps(f)
+    def wrapper(*args,**kwargs):
+        if "uid" not in session:
+            return jsonify({"ok": False, "error": "로그인이 필요합니다."}),401
+        g.user_id = session.get("user_id")
+        g.role = session.get("role")
+        return f(*args,**kwargs)
+    return wrapper
+
+# role(권한)이 관리자인지 확인
+def require_admin(f):
+    @wraps(f)
+    @require_login
+    def wrapper(*args, **kwargs):
+        if g.role != "admin":
+            return jsonify({"ok": False, "error": "접근 권한이 없습니다."}),403
+        return f(*args, **kwargs)
+    return wrapper
 
 # /login API
 @app.post("/login")
@@ -31,16 +78,22 @@ def login():
 
     # id 존재하지 않는 경우
     if not row:
-        return jsonify({"ok": False, "error": "존재하지 않는 아이디입니다."}),200 # 보안을 위해 아이디/비밀번호 불일치로 바꿀 예정
+        return jsonify({"ok": False, "error": "아이디 또는 비밀번호가 불일치합니다."}),200 # 
     
-    # 해시 처리된 비밀번호를 bytes로 인코딩
+    # 해시 처리된 비밀번호를 bytes로 인코딩 (비밀번호 검사)
     pw_hash = row["password_hash"]
     if isinstance(pw_hash,str):
         pw_hash = pw_hash.encode("utf-8")
 
     # pw 틀린 경우
     if not bcrypt.checkpw(pw.encode("utf-8"), pw_hash):
-        return jsonify({"ok":False, "error":"비밀번호 불일치"}),200 # 보안을 위해 아이디/비밀번호 불일치로 바꿀 예정
+        return jsonify({"ok":False, "error":"아이디 또는 비밀번호가 불일치합니다."}),200 
+    
+    # 세션 발급
+    session.clear()
+    session["uid"] = row["id"]
+    session["user_id"] = row["user_id"]
+    session["role"] = row["role"]
 
     # id와 pw 모두 정상적으로 일치
     return jsonify({
@@ -49,8 +102,25 @@ def login():
     }),200
 
 
+# /session (세션)
+@app.get("/session")
+def get_session():
+    if "uid" not in session:
+        return jsonify({"ok":False, "user":None}),200
+    return jsonify({
+        "ok":True,
+        "user":{"id":session.get("uid"), "user_id": session.get("user_id"), "role":session.get("role")}
+    }),200
 
-# /user-register API
+
+# /logout (로그아웃)
+@app.post("/logout")
+def logout():
+    session.clear() # 세션 초기화
+    return jsonify({"ok": True}),200
+
+
+# /user-register API (고객 회원가입)
 @app.post("/user-register")
 def register():
     data = request.get_json(silent=True) or {}

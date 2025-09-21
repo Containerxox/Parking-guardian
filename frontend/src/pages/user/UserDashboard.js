@@ -1,16 +1,27 @@
 import React, { useState, useEffect } from "react";
 import "./UserDashboard.css"; 
 import AppBar from "../../components/ui/AppBar";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../state/AuthContext";
 
+
+// =========================================================================
+// 클라우드 (배포용)
+// const API_BASE = "https://capston-bajen.run.goorm.site";
+// =========================================================================
+
+// 로컬 (개발용)
+const API_BASE = "http://localhost:5000";
 
 
 export default function UserDashboard() {
+  const navigate = useNavigate();
+  const {logout} = useAuth() || {};
+
   const [selectedZone, setSelectedZone] = useState("전체");
   const [violations, setViolations] = useState([]);
   const [selectedImage, setSelectedImage] = useState(null);
 
-  // 로그인도니 사용자 ID(데모용) ( 나중에 flask fetch해서 DB 연결해야 함. )
-  //const currentUserId = localStorage.getItem("userId") || "";
 
   const handelAddDevice = () => {
     // 사용자 ID 입력
@@ -27,15 +38,26 @@ export default function UserDashboard() {
       alert("시리얼 넘버를 입력하세요.");
       return;
     }
-
     // 확인용=> 입력한 ID와 시리얼 넘버 alert
     // 서버 연동은 나중에 할 예정
     alert(`입력한 ID: ${inputId}\n추가할 시리얼 넘버: ${serial}\n(백엔드 연동은 추후 진행 예정!)`);
-  }
+  };
+
+  // 로그아웃 처리
+  const handleLogout = async () => {
+    try{
+      if(logout){
+        await logout();  // 서버의 /logout 호출 & 전역 user=null
+      }
+    }finally{
+      navigate("/", {replace:true});
+    }
+  };
+
   
   
   useEffect(() => {
-    fetch('http://localhost:5000/violations')
+    fetch(`${API_BASE}/violations`,{ credentials: "include" })
       .then((res) => res.json())
       .then((data) => {
         const initialized = data.map((v) => ({ ...v, isReported: false }));
@@ -61,7 +83,7 @@ export default function UserDashboard() {
       <AppBar
        title="장애인 주차 구역 위반 감지 시스템"
        rightNode={<button className="pg-btn" onClick={handelAddDevice}>기기 추가</button>}
-       onLogout={() => alert("데모(로그아웃)")}
+       onLogout={handleLogout}
       />
 
 

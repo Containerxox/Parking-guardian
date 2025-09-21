@@ -2,6 +2,15 @@ import React, { useState } from "react";
 import "./UserRegistration.css";
 import { useNavigate } from "react-router-dom";
 
+// =========================================================================
+// 클라우드 (배포용)
+// const API_BASE = "https://capston-bajen.run.goorm.site";
+// =========================================================================
+
+// 로컬 (개발용)
+const API_BASE = "http://localhost:5000";
+
+
 export default function UserRegistration() {
   const navigate = useNavigate();
   const [id,setId] = useState("");
@@ -12,9 +21,7 @@ export default function UserRegistration() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    // alert(
-    //   `ID: ${form.userId}\nPW: ${form.password}\n건물명: ${form.building}\n주소: ${form.address}\n(백엔드 연동은 추후 진행 예정!)`
-    // );
+
     if(!id.trim() || !pw.trim() || !building.trim() || !address.trim()){
       alert("아이디, 비밀번호, 건물명, 건물 주소를 입력해주세요.");
       return;
@@ -22,7 +29,7 @@ export default function UserRegistration() {
 
     // 회원가입 API 연동
     try{
-      const res = await fetch('http://localhost:5000/user-register', {
+      const res = await fetch(`${API_BASE}/user-register`, {
         method:"POST",
         headers: {"Content-Type": "application/json"},
         body:JSON.stringify({user_id:id,password:pw, building_name: building, building_address:address}),
