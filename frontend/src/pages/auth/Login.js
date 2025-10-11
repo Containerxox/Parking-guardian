@@ -2,9 +2,21 @@ import React, { useState } from "react";
 import "./Login.css"; 
 import logo from "../../logo.png";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../state/AuthContext";
+
+// =========================================================================
+// 클라우드 (배포용)
+// const API_BASE = "https://capston-bajen.run.goorm.site";
+// =========================================================================
+
+// 로컬 (개발용)
+const API_BASE = "http://localhost:5000";
+
 
 export default function Login() {
   const navigate = useNavigate();
+  const {setUser} = useAuth();
+
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
   const [showPw, setShowPw] = useState(false);
@@ -21,20 +33,40 @@ export default function Login() {
 
     // 여기에 실제 로그인 API 연동 예정 !
     try {
-      const res = await fetch('http://localhost:5000/login', {
+      const res = await fetch(`${API_BASE}/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials:"include", // 교차출처에서도 쿠키 전송/수신 O
         body: JSON.stringify({ user_id: id, password: pw }),
       });
 
       const data = await res.json();
 
-      if(data.ok){
-        const role=data.user.role;
-        // 응답받은 json에서 role이 admin이면 /admin-dashboard로 이동, user면 /user-dashboard로 이동
-        navigate(role === "admin" ? "/admin-dashboard" : "/user-dashboard"); 
+      // if(data.ok){
+      //   const role=data.user.role;
+      //   // 응답받은 json에서 role이 admin이면 /admin-dashboard로 이동, user면 /user-dashboard로 이동
+      //   navigate(role === "admin" ? "/admin-dashboard" : "/user-dashboard"); 
+      // }else{
+      //   setError(data.error);
+      // }
+
+      if(!data.ok){
+        setError(data.error)
+        return;
+      }
+
+      const sessionRes=await fetch(`${API_BASE}/session`, {credentials:"include"});
+      const session = await sessionRes.json();
+
+      if (session.ok){
+        // 전역 변수 setUser에 세션 정보 저장
+        setUser(session.user);
+
+        // 권한에 따라 페이지 이동
+        const role = session.user.role;
+        navigate(role === "user" ? "/user-dashboard":"/admin-dashboard");
       }else{
-        setError(data.error);
+        setError("로그인에 실패하였습니다."); //세션 확인 실패
       }
 
     } 

@@ -2,8 +2,33 @@ import React, { useState, useMemo } from "react";
 import "./AdminDashboard.css";
 import AppBar from "../../components/ui/AppBar";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "../../state/AuthContext";
+
+
+// =========================================================================
+// 클라우드 (배포용)
+// const API_BASE = "https://capston-bajen.run.goorm.site";
+// =========================================================================
+
+// 로컬 (개발용)
+// const API_BASE = "http://localhost:5000";
+
 
 export default function AdminDashboard() {
+  const navigate = useNavigate();
+  const { logout } = useAuth() || {};
+
+  // 로그아웃 처리
+  const handleLogout = async () =>{
+    try{
+      if(logout){
+        await logout(); // 서버의 /logout 호출 & 전역 user=null
+      }
+    }finally{
+      navigate("/", {replace:true});
+    }
+  };
+
   // 하드코딩 더미 데이터
   const [rows, setRows] = useState([
     { buildingId: 102, address: "서울시 송파구 올림픽로 45", deviceCount: 2 },
@@ -49,14 +74,13 @@ export default function AdminDashboard() {
     setRows((prev) => prev.filter((r) => r.buildingId !== buildingId));
   };
 
-  const navigate = useNavigate();
   return (
     <div className="admin-root">
       {/* 상단 AppBar */}
      <AppBar
      title="관리자 페이지 - 건물 목록"
      rightNode={<button className="pg-btn" onClick={() => navigate("/user-registration")}>회원 관리</button>}
-     onLogout={() => alert("데모(로그아웃)")}
+     onLogout={handleLogout}
      />
 
       {/* 본문 */}
