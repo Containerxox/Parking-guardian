@@ -90,6 +90,40 @@ def register():
     return jsonify({"ok":True, "message": "회원가입이 완료되었습니다."})
 
 
+# /machine-register API
+# 입력 예시 : {"username": "홍길동","machine_id": "abdfvadafefew"}
+@app.post("/machine-register")
+def register_machine():
+    # 1. 클라이언트로부터 JSON 데이터를 받습니다.
+    data = request.get_json(silent=True) or {}
+    username = data.get("username")
+    machine_id = data.get("machine_id")
+
+    # 2. 필수 정보가 누락되었는지 확인합니다.
+    if not username or not machine_id:
+        return jsonify({"ok": False, "error": "사용자 이름과 기기 번호를 모두 입력해주세요."}), 200
+
+    # 3. DB에 데이터를 저장합니다.
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO machine (username, machine_id) VALUES (?, ?)",
+                (username.strip(), machine_id.strip())
+            )
+            # conn.commit() is called automatically by 'with' statement
+            
+    except sqlite3.IntegrityError:
+        # machine_id가 UNIQUE 제약 조건을 위반할 경우 (이미 존재할 경우)
+        return jsonify({"ok": False, "error": "이미 등록된 기기 번호입니다."}), 200
+    
+    except Exception as e:
+        # 기타 예상치 못한 서버 오류 처리
+        # print(f"An error occurred: {e}") # 디버깅용
+        return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
+
+    # 4. 성공적으로 등록된 경우
+    return jsonify({"ok": True, "message": "기기 등록이 완료되었습니다."}), 200
 
 
 # 간단 루트
