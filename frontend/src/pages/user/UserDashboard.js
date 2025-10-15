@@ -13,6 +13,16 @@ import { useAuth } from "../../state/AuthContext";
 // 로컬 (개발용)
 const API_BASE = "http://localhost:5000";
 
+// session에서 현재 로그인한 사용자ID 얻기
+async function getSessionUserId() {
+  const res = await fetch(`${API_BASE}/session`, {
+    method: "GET",
+    credentials: "include", //세션 쿠키 포함
+  });
+  const data = await res.json();
+  if (!data.ok || !data.user) return null;
+  return data.user.user_id;
+}
 
 export default function UserDashboard() {
   const navigate = useNavigate();
@@ -23,24 +33,51 @@ export default function UserDashboard() {
   const [selectedImage, setSelectedImage] = useState(null);
 
 
-  const handelAddDevice = () => {
-    // 사용자 ID 입력
-    const inputId = window.prompt("ID를 입력하세요.");
-    if(inputId === null) return;
-    if(!inputId.trim()){
-    alert("ID를 입력하세요."); return;
-    }
+  const handelAddDevice = async() => {
+       try{
+        // 1) 사용자 ID 입력받기
+        const inputId = window.prompt("ID를 입력하세요.");
+        if (inputId == null) return;
+        const trimmedId = (inputId || "").trim();
+        if(!trimmedId){
+          alert("ID를 입력하세요."); return;
+      }
 
-    // 추가할 라즈베리파이의 시리얼 넘버 입력
-    const serial = window.prompt("추가할 기기의 시리얼 넘버를 입력하세요.");
-    if(serial ===null) return;
-    if(!serial.trim()){
-      alert("시리얼 넘버를 입력하세요.");
-      return;
+      // 2) session에 저장된 현재 로그인된 사용자ID와 입력한 사용자ID 일치 여부 확인 
+      const sessionUserId = await getSessionUserId();
+      if(trimmedId !== sessionUserId){
+        alert(`입력한 ID가 올바르지 않습니다.`); return;
+      }
+
+      // 3) 장치의 시리얼 넘버 입력
+      const serial = window.prompt("추가할 장치의 시리얼 번호를 입력하세요.")
+      if(serial == null) return;
+      const serialTrimmed = (serial || "").trim();
+      if(!serialTrimmed){
+        alert("장치의 시리얼 번호를 입력하세요."); return;
+      }
+
+      // 4) /machine-register API 호출하여 장치 추가 등록하기
+      const res = await fetch(`${API_BASE}/machine-register`,{
+        method:"POST",
+        credentials: "include", // 세션 쿠키 포함
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          username:sessionUserId,
+          machine_id: serialTrimmed,
+        }),
+      });
+
+      const data = await res.json();
+      if(data.ok) {
+        alert("장치 등록이 완료되었습니다.");
+      }else{
+        alert(data.error);
+      }
+    }catch(e){
+      console.error(e);
+      alert("요청 처리 중 요류가 발생했습니다.");
     }
-    // 확인용=> 입력한 ID와 시리얼 넘버 alert
-    // 서버 연동은 나중에 할 예정
-    alert(`입력한 ID: ${inputId}\n추가할 시리얼 넘버: ${serial}\n(백엔드 연동은 추후 진행 예정!)`);
   };
 
   // 로그아웃 처리
