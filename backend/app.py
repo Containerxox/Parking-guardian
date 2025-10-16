@@ -358,6 +358,53 @@ def get_violation():
         return jsonify({"ok": False, "error": "DB 오류가 발생했습니다.", "detail": str(e)}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다.", "detail": str(e)}), 500
+    
+    
+#  ============ /violations API  ============
+# violations 테이블에 저장된 위반 정보들을 조회
+@app.get("/violations")
+@require_login
+def list_violations():
+    DEFAULT_LIMIT = 100
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT
+                    v.machine_id,
+                    v.zone,
+                    v.time,
+                    v.image,
+                    b.name     AS building_name
+                FROM violations v
+                JOIN machine   m ON m.machine_id = v.machine_id
+                LEFT JOIN users u ON u.user_id   = m.username
+                LEFT JOIN buildings b ON b.id    = u.building_id
+                WHERE m.username = ?
+                ORDER BY datetime(v.time) DESC
+                LIMIT ?
+            """, (g.user_id, DEFAULT_LIMIT)).fetchall()
+
+        data = [
+            {
+                "building_name": r["building_name"],
+                "serial_number": r["machine_id"],
+                "zone": r["zone"],
+                "time": r["time"],
+                "image": r["image"],
+            } for r in rows
+        ]
+        return jsonify(data), 200
+
+    except sqlite3.OperationalError as e:
+        app.logger.exception("OperationalError in GET /violations")
+        return jsonify({"ok": False, "error": "DB 운영 오류가 발생했습니다."}), 500
+    except sqlite3.DatabaseError as e:
+        app.logger.exception("DatabaseError in GET /violations")
+        return jsonify({"ok": False, "error": "DB 오류가 발생했습니다."}), 500
+    except Exception as e:
+        app.logger.exception("Unhandled error in GET /violations")
+        return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
+
 
 # 간단 루트
 @app.route("/", methods=["GET"])

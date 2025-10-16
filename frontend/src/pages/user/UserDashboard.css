@@ -48,9 +48,10 @@
 /* ===== 위반 내역 Card ===== */
 .violations-grid{
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 420px));
   gap: 16px;
   margin-top: 12px;
+  justify-content: center;
 }
 @media (max-width: 640px){
   .violations-grid{ grid-template-columns: 1fr; }

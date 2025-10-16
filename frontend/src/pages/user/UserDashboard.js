@@ -31,6 +31,7 @@ export default function UserDashboard() {
   const [selectedZone, setSelectedZone] = useState("전체");
   const [violations, setViolations] = useState([]);
   const [selectedImage, setSelectedImage] = useState(null);
+  const [buildingName, setBuildingName] = useState("");
 
 
   const handleAddDevice = async() => {
@@ -94,14 +95,34 @@ export default function UserDashboard() {
   
   
   useEffect(() => {
-    fetch(`${API_BASE}/violations`,{ credentials: "include" })
-      .then((res) => res.json())
-      .then((data) => {
-        const initialized = data.map((v) => ({ ...v, isReported: false }));
-        setViolations(initialized);
-      })
-      .catch((err) => console.error("데이터 불러오기 실패:", err));
-  }, []);
+  fetch(`${API_BASE}/violations`, { credentials: "include" })
+    .then((res) =>
+      res.json().then((data) => ({ ok: res.ok, data }))
+    )
+    .then(({ ok, data }) => {
+      // HTTP 오류(500/404/등) → 서버가 준 error 우선 표시
+      if (!ok) {
+        alert((data && data.error) || "요청 실패");
+        return;
+      }
+      // 서버 표준 에러 형태 { ok:false, error } 대응 (혹시 있을 경우)
+      if (data && data.ok === false) {
+        alert(data.error || "오류가 발생했습니다.");
+        return;
+      }
+      // 정상: 배열 기대
+      const rows = Array.isArray(data) ? data : [];
+      const initialized = rows.map((v) => ({ ...v, isReported: false }));
+      setViolations(initialized);
+
+      if (rows.length > 0) setBuildingName(rows[0].building_name || ""); 
+    })
+    .catch((err) => {
+      console.error("데이터 불러오기 실패:", err);
+      alert("서버 통신 오류");
+    });
+}, []);
+
 
   const toggleReported = (serial_number) => {
     setViolations((prev) =>
@@ -126,7 +147,7 @@ export default function UserDashboard() {
 
       {/* 본문 */}
       <main className="user-container">
-        <h1 className="page-h1">조선대학교 - 장애인 주차 위반 내역</h1>
+        <h1 className="page-h1">{(buildingName)} - 장애인 주차 위반 내역</h1>
 
 
         {/* 구역 필터 */}
@@ -148,9 +169,8 @@ export default function UserDashboard() {
             <div className="empty-grid">해당 구역에 위반 기록이 없습니다.</div>
           ) : (
             filtered.map((v) => (
-              <div key={v.serial_number} className="violation-card">
+              <div key={`${v.serial_number}-${v.time}`} className="violation-card">
                 <p>📍 <strong>{v.zone}</strong></p>
-                {/* <p>🚗 차량번호: {v.carNumber}</p> */}
                 <p>⏰ 시간: {v.time}</p>
 
                 <label className="reported-check" translate="no">
@@ -165,7 +185,7 @@ export default function UserDashboard() {
                 {v.image && (
                   <div className="thumb-wrap">
                     <img
-                      src={`http://localhost:5000/uploads/${v.image}`}
+                      src={`${API_BASE}/uploads/${v.image}`}
                       alt="차량 이미지"
                       onClick={() => setSelectedImage(v.image)}
                       className="thumb-img"
@@ -182,7 +202,7 @@ export default function UserDashboard() {
       {selectedImage && (
         <div className="img-modal" onClick={() => setSelectedImage(null)}>
           <img
-            src={`http://localhost:5000/uploads/${selectedImage}`}
+            src={`${API_BASE}/uploads/${selectedImage}`}
             alt="차량 이미지"
             className="img-modal-content"
           />
