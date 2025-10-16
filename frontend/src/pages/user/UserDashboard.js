@@ -33,7 +33,7 @@ export default function UserDashboard() {
   const [selectedImage, setSelectedImage] = useState(null);
 
 
-  const handelAddDevice = async() => {
+  const handleAddDevice = async() => {
        try{
         // 1) 사용자 ID 입력받기
         const inputId = window.prompt("ID를 입력하세요.");
@@ -119,7 +119,7 @@ export default function UserDashboard() {
       {/* 상단 AppBar */}
       <AppBar
        title="장애인 주차 구역 위반 감지 시스템"
-       rightNode={<button className="pg-btn" onClick={handelAddDevice}>기기 추가</button>}
+       rightNode={<button className="pg-btn" onClick={handleAddDevice}>기기 추가</button>}
        onLogout={handleLogout}
       />
 

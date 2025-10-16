@@ -21,3 +21,10 @@ CREATE TABLE machine (
     ON DELETE CASCADE
     ON UPDATE CASCADE
 );
+CREATE TABLE violations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            machine_id TEXT NOT NULL,
+            zone TEXT NOT NULL,
+            time TEXT NOT NULL,               
+            image TEXT                      
+);

@@ -1,18 +1,26 @@
 # app.py
+import os
 from flask import Flask, request, jsonify, session, g
 from flask_cors import CORS
 import sqlite3, bcrypt
 from functools import wraps
+from datetime import datetime
 
 # ====================================================================================================
 # 클라우드 (배포 용) DB 저장 경로
 # DB_PATH=r"backend\parking_guardian.db"
 # ====================================================================================================
 
-# 로컬 (개발 용) DB 저장 경
+# 로컬 (개발 용) DB 저장 경로
 DB_PATH=r"C:\sqlite\parking_guardian.db"
 
-app = Flask(__name__)
+# 이미지 파일(/uploads) 경로 설정
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+app = Flask(__name__, static_folder=UPLOAD_DIR, static_url_path="/uploads")
+app.config["UPLOAD_FOLDER"] = UPLOAD_DIR
 app.secret_key = "capstone-team3-random" # 세션에 사용될 랜덤키 (나중에 환경변수로 관리할 예정)
 
 # 로컬 개발용 (Http) (front:3000 <-> back:5000) 
@@ -35,7 +43,7 @@ CORS(
     supports_credentials=True, # 세션/쿠키 전송 허용
     )
 
-# DB 연결
+# ============ DB 연결 ============
 def get_db():
     conn =sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -43,7 +51,7 @@ def get_db():
     return conn
 
 
-# 로그인 여부 확인 (세션 확인)
+# ============ 로그인 여부 확인 (세션 확인) ============
 def require_login(f):
     @wraps(f)
     def wrapper(*args,**kwargs):
@@ -54,7 +62,7 @@ def require_login(f):
         return f(*args,**kwargs)
     return wrapper
 
-# role(권한)이 관리자인지 확인
+# ============ role(권한)이 관리자인지 확인 ============
 def require_admin(f):
     @wraps(f)
     @require_login
@@ -64,7 +72,7 @@ def require_admin(f):
         return f(*args, **kwargs)
     return wrapper
 
-# /login API
+# ============ /login API ============
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or {}
@@ -103,7 +111,7 @@ def login():
     }),200
 
 
-# /session (세션)
+# ============ /session (세션) ============
 @app.get("/session")
 def get_session():
     if "uid" not in session:
@@ -114,14 +122,14 @@ def get_session():
     }),200
 
 
-# /logout (로그아웃)
+# ============ /logout (로그아웃) ============
 @app.post("/logout")
 def logout():
     session.clear() # 세션 초기화
     return jsonify({"ok": True}),200
 
 
-# /user-register API (고객 회원가입)
+# ============ /user-register API (고객 회원가입) ============
 @app.post("/user-register")
 def register():
     data = request.get_json(silent=True) or {}
@@ -161,7 +169,7 @@ def register():
     return jsonify({"ok":True, "message": "회원가입이 완료되었습니다."})
 
 
-# /machine-register API
+# ============ /machine-register API ============
 # 입력 예시 : {"username": "홍길동","machine_id": "abdfvadafefew"}
 @app.post("/machine-register")
 def register_machine():
@@ -197,7 +205,7 @@ def register_machine():
     return jsonify({"ok": True, "message": "기기 등록이 완료되었습니다."}), 200
 
 
-# /admin/users-devices API  
+# ============ /admin/users-devices API ============
 # (AdminDashboard에서 표현될 전체 사용자 정보) ( idx | 사용자ID | 건물ID | 주소 | 설치기기수 )
 @app.get("/admin/users-devices")
 @require_admin # admin만 호출 가능
@@ -247,7 +255,7 @@ def admin_users_devices():
             "error":"서버 처리 중 오류가 발생했습니다."
         }),500
     
-# /admin/user-delete/<user_id> API
+# ============ /admin/user-delete/<user_id> API ============
 # AdminDashboard에서 관리자가 사용자 단위로 삭제
 # ㄴ 해당 user_id 행만 제거, 같은 건물의 다른 사용자는 유지 (다만, 같은 건물을 사용하는 다른 사용자가 없으면 건물도 함께 삭제시킴)
 # ㄴ 해당 사용자의 machine은 FK CASCADE로 자동 삭제
@@ -301,6 +309,55 @@ def admin_delete_user(user_id: str):
 
     except Exception:
         return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
+    
+# ============ violations 테이블에 위반 정보들을 저장 ============
+@app.post("/violations")
+def get_violation():
+    """
+    예시) 라즈베리파이가 아래 JSON 형식을 서버로 전송
+    {
+      "machine_id": "a1234", # 시리얼 번호
+      "zone": "A구역",
+      "time": "2025-10-16 12:34:56",   # 라즈베리파이에서 서버로 사진 전송할 때의 time을 사용
+      "image": "saved_filename.jpg"    
+    }
+
+    *** AI학습모델을 실행하여 주차 위반으로 인식되면 아래 코드를 실행하는 구조로 생각하고 코드를 구상함. ***
+    """
+    data = request.get_json(silent=True) or {}
+
+    machine_id = (data.get("machine_id") or "").strip()
+    zone = (data.get("zone") or "").strip()
+    image = (data.get("image") or "").strip()
+    time_str = (data.get("time") or "").strip()
+
+    # 필수값 확인
+    if not machine_id or not zone or not time_str:
+        return jsonify({"ok":False, "error":"machine_id, zone, time은 필수입니다."}),400
+    
+    # 시간 형식 확인 # 예시) YYYY-MM-DD HH:MM:SS
+    try:
+        datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return jsonify({"ok": False, "error": "time 형식이 잘못되었습니다. 예: 2025-10-16 12:34:56"}), 400
+    
+    # violations 테이블에 위반 정보들을 저장 (machine_id, zone, time, image)
+    try:
+        with get_db() as conn:
+            cur = conn.execute(
+                "INSERT INTO violations (machine_id, zone, time, image) VALUES (?, ?, ?, ?)",
+                (machine_id, zone, time_str, image)
+            )
+            vid = cur.lastrowid
+
+        return jsonify({"ok": True, "id": vid}), 201
+
+    except sqlite3.OperationalError as e:
+        return jsonify({"ok": False, "error": "DB 운영 오류가 발생했습니다.", "detail": str(e)}), 500
+    except sqlite3.DatabaseError as e:
+        return jsonify({"ok": False, "error": "DB 오류가 발생했습니다.", "detail": str(e)}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다.", "detail": str(e)}), 500
 
 # 간단 루트
 @app.route("/", methods=["GET"])
