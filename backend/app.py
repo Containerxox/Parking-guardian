@@ -31,7 +31,7 @@ CORS(
     app, 
     resources={r"/*": {"origins": ALLOWED_ORIGINS}},
     allow_headers=["Content-Type", "Authorization"], # 요청에서 허용할 헤더
-    methods=["POST","GET","OPTIONS"], # 허용할 메서드
+    methods=["POST","GET","OPTIONS","DELETE"], # 허용할 메서드
     supports_credentials=True, # 세션/쿠키 전송 허용
     )
 
@@ -39,6 +39,7 @@ CORS(
 def get_db():
     conn =sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
@@ -195,6 +196,56 @@ def register_machine():
     # 4. 성공적으로 등록된 경우
     return jsonify({"ok": True, "message": "기기 등록이 완료되었습니다."}), 200
 
+
+# /admin/users-devices API  
+# (AdminDashboard에서 표현될 전체 사용자 정보) ( idx | 사용자ID | 건물ID | 주소 | 설치기기수 )
+@app.get("/admin/users-devices")
+@require_admin # admin만 호출 가능
+def admin_users_devices():
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT
+                    u.id          AS idx,
+                    u.user_id     AS user_id,
+                    u.building_id AS building_id,
+                    b.address     AS address,
+                    COUNT(m.id)   AS device_count
+                FROM users u
+                LEFT JOIN buildings b
+                ON b.id = u.building_id
+                LEFT JOIN machine m
+                ON m.username = u.user_id
+                WHERE u.role = 'user' 
+                GROUP BY u.id, u.user_id, u.building_id, b.address
+                ORDER BY u.id
+            """).fetchall()
+
+        data = [
+            {
+                "idx": r["idx"],
+                "user_id": r["user_id"],
+                "building_id": r["building_id"],         
+                "address": r["address"],                  
+                "device_count": int(r["device_count"]),   
+            }
+            for r in rows
+        ]
+        return jsonify({"ok": True, "rows": data}), 200
+    
+    except sqlite3.DatabaseError as e:
+        app.logger.exception("DatabaseError in /admin/users-devices")
+        return jsonify({
+            "ok":False,
+            "error":"데이터베이스 오류가 발생했습니다."
+        }),500
+    
+    except Exception as e:
+        app.logger.exception("Unhandled error in /admin/users-devices")
+        return jsonify({
+            "ok":False,
+            "error":"서버 처리 중 오류가 발생했습니다."
+        }),500
 
 # 간단 루트
 @app.route("/", methods=["GET"])

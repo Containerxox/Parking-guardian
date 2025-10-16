@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import "./AdminDashboard.css";
 import AppBar from "../../components/ui/AppBar";
 import { useNavigate } from "react-router-dom";
@@ -11,7 +11,7 @@ import { useAuth } from "../../state/AuthContext";
 // =========================================================================
 
 // 로컬 (개발용)
-// const API_BASE = "http://localhost:5000";
+const API_BASE = "http://localhost:5000";
 
 
 export default function AdminDashboard() {
@@ -29,50 +29,88 @@ export default function AdminDashboard() {
     }
   };
 
-  // 하드코딩 더미 데이터
-  const [rows, setRows] = useState([
-    { buildingId: 102, address: "서울시 송파구 올림픽로 45", deviceCount: 2 },
-    { buildingId: 201, address: "경기도 성남시 판교역로 10", deviceCount: 7 },
-    { buildingId: 301, address: "부산광역시 해운대구 A로 77", deviceCount: 3 },
-  ]);
+  // 서버에서 받아올 실제 데이터
+  // row 형태: {idx, user_id, building_id, address, device_count}
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   // 검색 관련
-  const [searchField, setSearchField] = useState("buildingId"); // 검색 옵션
+  const [searchField, setSearchField] = useState("building_id"); // 검색 옵션
   const [query, setQuery] = useState(""); //검색어
   const [appliedQuery, setAppliedQuery] = useState({ field: "", value: "" }); // 검색 옵션 + 검색어
 
-  // 검색 & 초기화
+  // API 호출하여 데이터 로드 
+  useEffect(() => {
+    (async () => {
+      try{
+        const res = await fetch(`${API_BASE}/admin/users-devices`,{
+          credentials:"include", //세션쿠키 포함
+        });
+        
+        const data = await res.json();
+        if(!data.ok){
+          alert(data.error);
+          navigate("/", {replace:true});
+          return;
+        }
+        setRows(data.rows || []);
+      }catch(e){
+        console.error(e);
+        alert("서버 통신 오류");
+      }finally{
+        setLoading(false);
+      }
+    })();
+  },[navigate]);
+
+  // 검색 적용
   const handleSearch = () => {
     setAppliedQuery({ field: searchField, value: query.trim().toLowerCase() });
   };
+
+  // 검색 초기화
   const handleReset = () => {
     setQuery("");
     setAppliedQuery({ field: "", value: "" });
   };
 
-  // idx  + 검색 필터 적용
+  // 화면에 표현할 목록 (검색 적용하여)
   const viewRows = useMemo(() => {
-    const base = !appliedQuery.value
-      ? rows // 검색어 X 경우 -> 전체 row 그대로 사용
-      : rows.filter((r) => { // 검색어 존재 경우 -> 필터링
-          if (appliedQuery.field === "buildingId") {
-            return String(r.buildingId).includes(appliedQuery.value);
-          }
-          if (appliedQuery.field === "address") {
-            return r.address.toLowerCase().includes(appliedQuery.value);
-          }
-          if (appliedQuery.field === "deviceCount") {
-            return String(r.deviceCount).includes(appliedQuery.value);
-          }
-          return true;
-        });
-    return base.map((r, i) => ({ idx: i + 1, ...r }));
+    if (!appliedQuery.value) return rows;
+    const val = appliedQuery.value;
+    return rows.filter((r) => {
+      if (appliedQuery.field === "user_id") {
+        return String(r.user_id ?? "").includes(val);
+      }
+      if (appliedQuery.field === "building_id") {
+        return String(r.building_id ?? "").includes(val);
+      }
+      if (appliedQuery.field === "address") {
+        return String(r.address ?? "").toLowerCase().includes(val);
+      }
+      if (appliedQuery.field === "device_count") {
+        return String(r.device_count ?? 0).includes(val);
+      }
+      return true;
+    });
   }, [rows, appliedQuery]);
 
-  const handleDelete = (buildingId) => {
-    if (!window.confirm(`건물ID ${buildingId}를 삭제할까요?`)) return;
-    setRows((prev) => prev.filter((r) => r.buildingId !== buildingId));
+
+  const handleDelete = (building_id) => {
+    if (!window.confirm(`건물ID ${building_id}를 삭제할까요?`)) return;
+    setRows((prev) => prev.filter((r) => r.building_id !== building_id));
   };
+
+
+
+    if (loading) {
+    return (
+      <div className="admin-root">
+        <AppBar title="관리자 페이지 - 건물 목록" onLogout={handleLogout} />
+        <main className="admin-container">로딩중…</main>
+      </div>
+    );
+  }
 
   return (
     <div className="admin-root">
@@ -92,6 +130,7 @@ export default function AdminDashboard() {
             onChange={(e) => setSearchField(e.target.value)}
             className="admin-select"
           >
+            <option value="user_id">사용자 ID</option>
             <option value="buildingId">건물 ID</option>
             <option value="address">주소</option>
             <option value="deviceCount">설치 기기 수</option>
@@ -119,6 +158,7 @@ export default function AdminDashboard() {
               <thead>
                 <tr>
                   <th>idx</th>
+                  <th>사용자ID</th>
                   <th>건물 ID</th>
                   <th>주소</th>
                   <th>설치 기기 수</th>
@@ -134,11 +174,12 @@ export default function AdminDashboard() {
                   </tr>
                 ) : (
                   viewRows.map((r) => (
-                    <tr key={r.buildingId}>
+                    <tr key={`${r.idx}-${r.user_id}`}> 
                       <td className="center">{r.idx}</td>
-                      <td className="center">{r.buildingId}</td>
-                      <td className="center">{r.address}</td>
-                      <td className="center">{r.deviceCount}</td>
+                      <td className="center" translate="no">{r.user_id}</td>
+                      <td className="center" translate="no">{r.building_id ?? "-"}</td>
+                      <td className="center" translate="no">{r.address ?? "-"}</td>
+                      <td className="center">{(r.device_count ?? 0)}</td>
                       <td className="center">
                         <button
                           onClick={() => handleDelete(r.buildingId)}

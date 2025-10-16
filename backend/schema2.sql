@@ -13,8 +13,11 @@ CREATE TABLE users(
   foreign key(building_id) references buildings(id) on delete cascade
 );
 CREATE TABLE machine (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL,
-    machine_id TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL,
+  machine_id TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (username) REFERENCES users(user_id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
 );
