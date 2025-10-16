@@ -124,11 +124,36 @@ export default function UserDashboard() {
 }, []);
 
 
-  const toggleReported = (serial_number) => {
-    setViolations((prev) =>
-      prev.map((v) => (v.serial_number === serial_number ? { ...v, isReported: !v.isReported } : v))
-    );
-  };
+const handleReportedChange = async (v, checked) => {
+  if (!checked) {
+    // 체크 해제 시엔 아무것도 안 함(원하면 복원 로직)
+    setViolations(prev => prev.map(x => x.id === v.id ? { ...x, isReported: false } : x));
+    return;
+  }
+  // 먼저 UI에 체크 반영
+  setViolations(prev => prev.map(x => x.id === v.id ? { ...x, isReported: true } : x));
+
+  try {
+    const res = await fetch(`${API_BASE}/violations/${encodeURIComponent(v.id)}`, {
+      method: "DELETE",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || payload?.ok === false) {
+      alert((payload && payload.error) || "삭제 실패하였습니다.");
+      // 실패하면 체크 되돌리기
+      setViolations(prev => prev.map(x => x.id === v.id ? { ...x, isReported: false } : x));
+      return;
+    }
+    // 성공: 목록에서 제거
+    setViolations(prev => prev.filter(x => x.id !== v.id));
+  } catch (e) {
+    console.error(e);
+    alert("서버 통신 오류가 발생하였습니다.");
+    setViolations(prev => prev.map(x => x.id === v.id ? { ...x, isReported: false } : x));
+  }
+};  
 
   const filtered =
     selectedZone === "전체"
@@ -169,7 +194,7 @@ export default function UserDashboard() {
             <div className="empty-grid">해당 구역에 위반 기록이 없습니다.</div>
           ) : (
             filtered.map((v) => (
-              <div key={`${v.serial_number}-${v.time}`} className="violation-card">
+              <div key={v.id} className="violation-card">
                 <p>📍 <strong>{v.zone}</strong></p>
                 <p>⏰ 시간: {v.time}</p>
 
@@ -177,7 +202,7 @@ export default function UserDashboard() {
                   <input
                     type="checkbox"
                     checked={v.isReported}
-                    onChange={() => toggleReported(v.serial_number)}
+                    onChange={(e) => handleReportedChange(v, e.target.checked)}
                   />
                   신고 완료
                 </label>

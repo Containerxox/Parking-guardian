@@ -359,7 +359,7 @@ def get_violation():
     except Exception as e:
         return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다.", "detail": str(e)}), 500
     
-    
+
 #  ============ /violations API  ============
 # violations 테이블에 저장된 위반 정보들을 조회
 @app.get("/violations")
@@ -371,6 +371,7 @@ def list_violations():
             rows = conn.execute("""
                 SELECT
                     v.machine_id,
+                    v.id,
                     v.zone,
                     v.time,
                     v.image,
@@ -387,6 +388,7 @@ def list_violations():
         data = [
             {
                 "building_name": r["building_name"],
+                "id":r["id"],
                 "serial_number": r["machine_id"],
                 "zone": r["zone"],
                 "time": r["time"],
@@ -405,6 +407,35 @@ def list_violations():
         app.logger.exception("Unhandled error in GET /violations")
         return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
 
+
+#  ============ /violations API  ============
+# violations 테이블에 저장된 위반 정보 row를 삭제 (웹페이지의 신고완료 체크박스 클릭 시, API 호출됨) 
+@app.delete("/violations/<int:vid>")
+@require_login
+def delete_violation(vid: int):
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            # 소유권 확인: 로그인 사용자(g.user_id)의 기기로 생성된 기록인지
+            owned = cur.execute("""
+                SELECT 1
+                FROM violations v
+                JOIN machine   m ON m.machine_id = v.machine_id
+                WHERE v.id = ? AND m.username = ?
+                LIMIT 1
+            """, (vid, g.user_id)).fetchone()
+
+            if not owned:
+                # 남의 기록이거나 존재하지 않음
+                return jsonify({"ok": False, "error": "기록을 찾을 수 없거나 권한이 없습니다."}), 404
+
+            # violations테이블에서 해당 위반내역의 row가 삭제됨
+            cur.execute("DELETE FROM violations WHERE id = ?", (vid,))
+            return jsonify({"ok": True}), 200
+
+    except Exception:
+        app.logger.exception("DELETE /violations failed")
+        return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
 
 # 간단 루트
 @app.route("/", methods=["GET"])
