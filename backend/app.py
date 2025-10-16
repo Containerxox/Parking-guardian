@@ -246,6 +246,61 @@ def admin_users_devices():
             "ok":False,
             "error":"서버 처리 중 오류가 발생했습니다."
         }),500
+    
+# /admin/user-delete/<user_id> API
+# AdminDashboard에서 관리자가 사용자 단위로 삭제
+# ㄴ 해당 user_id 행만 제거, 같은 건물의 다른 사용자는 유지 (다만, 같은 건물을 사용하는 다른 사용자가 없으면 건물도 함께 삭제시킴)
+# ㄴ 해당 사용자의 machine은 FK CASCADE로 자동 삭제
+# ㄴ 그 사용자의 건물을 중복 사용하는 다른 사용자가 0명일 때만 buildings에서도 삭제 
+@app.delete("/admin/user-delete/<user_id>")
+@require_admin
+def admin_delete_user(user_id: str):
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+
+            # 대상 사용자ID 조회
+            u = cur.execute(
+                "SELECT user_id, building_id FROM users WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+            if not u:
+                return jsonify({"ok": False, "error": "해당 사용자가 존재하지 않습니다."}), 404
+
+            building_id = u["building_id"]
+
+            # username(=사용자ID)을 기반으로 삭제될 machine 수 집계
+            machine_cnt = cur.execute(
+                "SELECT COUNT(*) AS c FROM machine WHERE username = ?",
+                (user_id,)
+            ).fetchone()["c"]
+
+            # 사용자ID 삭제 -> machine은 CASCADE로 자동 삭제됨.
+            cur.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            users_deleted = cur.rowcount or 0
+
+            # 건물 orphan 여부 확인 후 정리
+            buildings_deleted = 0
+            if building_id is not None:
+                remain = cur.execute(
+                    "SELECT COUNT(*) AS c FROM users WHERE building_id = ?",
+                    (building_id,)
+                ).fetchone()["c"]
+                if remain == 0:
+                    cur.execute("DELETE FROM buildings WHERE id = ?", (building_id,))
+                    buildings_deleted = cur.rowcount or 0
+
+        return jsonify({
+            "ok": True,
+            "deleted": {
+                "users": users_deleted,
+                "machines": machine_cnt,
+                "buildings": buildings_deleted
+            }
+        }), 200
+
+    except Exception:
+        return jsonify({"ok": False, "error": "서버 처리 중 오류가 발생했습니다."}), 500
 
 # 간단 루트
 @app.route("/", methods=["GET"])

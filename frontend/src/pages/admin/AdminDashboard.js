@@ -96,10 +96,30 @@ export default function AdminDashboard() {
   }, [rows, appliedQuery]);
 
 
-  const handleDelete = (building_id) => {
-    if (!window.confirm(`건물ID ${building_id}를 삭제할까요?`)) return;
-    setRows((prev) => prev.filter((r) => r.building_id !== building_id));
+  // 사용자 단위 삭제: 해당 user_id 행만 제거, 같은 건물의 다른 사용자는 유지
+  const handleDelete = async (userId) => {
+    if (!userId) return;
+    if (!window.confirm(`사용자 ${userId}와 해당 사용자의 장치를 삭제할까요?\n(같은 건물에 다른 사용자가 없으면 건물도 함께 삭제됩니다)`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/admin/user-delete/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        alert(data.error || "삭제에 실패했습니다.");
+        return;
+      }
+      setRows((prev) => prev.filter((r) => r.user_id !== userId));
+      if(data.ok){
+        alert(`삭제 완료되었습니다.`);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("서버 통신 오류");
+    }
   };
+
 
 
 
@@ -182,7 +202,7 @@ export default function AdminDashboard() {
                       <td className="center">{(r.device_count ?? 0)}</td>
                       <td className="center">
                         <button
-                          onClick={() => handleDelete(r.buildingId)}
+                          onClick={() => handleDelete(r.user_id)}
                           className="btn btn-danger"
                         >
                           삭제
