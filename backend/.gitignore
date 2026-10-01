@@ -14,3 +14,6 @@ venv/
 *.sqlite-journal
 *.db-shm
 *.db-wal
+
+# YOLO Model
+models/*.pt
