@@ -87,7 +87,9 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
 
     # Lock the machine row so two photos of the same machine are applied one after the other.
     # (PostgreSQL honours FOR UPDATE; SQLite serialises writers anyway.)
-    machine = db.session.scalar(select(Machine).where(Machine.id == machine_id).with_for_update())
+    # of=Machine is required on PostgreSQL: Machine eagerly joins its parking lot and company with
+    # outer joins, and a plain FOR UPDATE is rejected on the nullable side of an outer join.
+    machine = db.session.scalar(select(Machine).where(Machine.id == machine_id).with_for_update(of=Machine))
     active = _active_episode(machine.id)
 
     # Rule 4: a long silence invalidates whatever was being counted.

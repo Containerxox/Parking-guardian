@@ -53,6 +53,26 @@ python wsgi.py                  # http://127.0.0.1:5000
 
 설정은 `backend/.env` 로 바꾼다. 항목은 `.env.example` 참고. 기본 DB는 `instance/parking_guardian.db` (SQLite) 이고, `DATABASE_URL` 을 주면 PostgreSQL을 쓴다.
 
+## PostgreSQL로 실행
+
+운영 환경과 같은 DB로 돌려 보려면 저장소 루트의 `docker-compose.yml` 로 PostgreSQL 16을 띄운다.
+
+```powershell
+cd C:\parking_guardian\capston
+docker compose up -d db          # 127.0.0.1:5432, 개발용 DB와 테스트용 DB가 함께 만들어진다
+
+cd backend
+$env:DATABASE_URL = "postgresql+psycopg://parking:parking_dev_password@127.0.0.1:5432/parking_guardian"
+flask --app wsgi db upgrade
+flask --app wsgi seed
+python wsgi.py
+```
+
+- 주소는 `localhost` 가 아니라 `127.0.0.1` 로 쓴다. 이 PC에서 `localhost` 는 연결 한 번에 1분 넘게 걸렸다 (IPv6 주소를 먼저 시도하는데 컨테이너 포트는 IPv4에만 열려 있다).
+- PostgreSQL 사용자 이름은 `pg_` 로 시작할 수 없다. 그래서 기본 사용자는 `parking` 이다.
+- 계속 PostgreSQL을 쓰려면 `backend/.env` 에 `DATABASE_URL` 을 적어 둔다.
+- 정지는 `docker compose down`, 데이터까지 지우려면 `docker compose down -v`.
+
 ## 데모 계정
 
 비밀번호는 모두 `Passw0rd!` 다.
@@ -97,7 +117,16 @@ python scripts\send_detection.py --heartbeat
 python -m pytest tests -q
 ```
 
-테스트는 메모리 SQLite와 mock 추론을 쓰므로 torch가 없어도 돈다. 회사 간 접근 차단, 담당자에게만 알림 전송, 상태 전이, 부분 실패(이미지 저장 실패, 알림 실패, 추론 실패)를 검증한다.
+테스트는 기본으로 메모리 SQLite와 mock 추론을 쓰므로 torch도 Docker도 없이 돈다. 같은 테스트를 PostgreSQL에서 돌리려면 `TEST_DATABASE_URL` 을 준다.
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+psycopg://parking:parking_dev_password@127.0.0.1:5432/parking_guardian_test"
+python -m pytest tests -q
+```
+
+SQLite는 일부 구문을 무시하므로 DB 제약이나 잠금에 관련된 변경은 PostgreSQL에서도 돌려야 한다. 실제로 장비 업로드의 행 잠금 구문이 SQLite에서는 통과하고 PostgreSQL에서만 실패했다.
+
+회사 간 접근 차단, 담당자에게만 알림 전송, 상태 전이, 부분 실패(이미지 저장 실패, 알림 실패, 추론 실패)를 검증한다.
 
 ## DB Schema 변경
 

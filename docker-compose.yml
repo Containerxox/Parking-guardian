@@ -1,0 +1,36 @@
+# Parking Guardian local environment.
+#
+# For now this only runs PostgreSQL. Backend, frontend, AI inference and the notification worker
+# are added as services in later steps.
+#
+#   docker compose up -d db        start PostgreSQL
+#   docker compose ps              check that it is healthy
+#   docker compose down            stop (data is kept in the pgdata volume)
+#   docker compose down -v         stop and delete the data
+#
+# The credentials below are for local development only.
+name: parking-guardian
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-parking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-parking_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-parking_guardian}
+    ports:
+      # Bound to localhost only: the database is not reachable from other machines.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, when the data volume is first created (creates the test database).
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:

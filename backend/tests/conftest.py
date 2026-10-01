@@ -1,5 +1,16 @@
-"""Test fixtures: an isolated app on in-memory SQLite with mock inference and the demo data set."""
+"""Test fixtures: an isolated app with mock inference and the demo data set.
+
+The database is in-memory SQLite by default (fast, needs nothing installed).
+Set TEST_DATABASE_URL to run the same tests against PostgreSQL, which is what production uses:
+
+    docker compose up -d db
+    set TEST_DATABASE_URL=postgresql+psycopg://parking:parking_dev_password@127.0.0.1:5432/parking_guardian_test
+    python -m pytest tests -q
+
+Every test drops and recreates all tables, so point it only at a database made for tests.
+"""
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -17,11 +28,18 @@ API = "/api/v1"
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"fake-jpeg-content"
 
 
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "sqlite:///:memory:")
+
+
+def pytest_report_header(config):
+    return f"database: {TEST_DATABASE_URL.split('@')[-1]}"  # host/db only, never the password
+
+
 @pytest.fixture
 def app(tmp_path):
     app = create_app({
         "TESTING": True,
-        "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+        "SQLALCHEMY_DATABASE_URI": TEST_DATABASE_URL,
         "INFERENCE_BACKEND": "mock",
         "IMAGE_STORAGE_DIR": str(tmp_path / "storage"),
         "JWT_SECRET": "test-secret-with-enough-length-for-hs256",
@@ -31,6 +49,7 @@ def app(tmp_path):
         "VIOLATION_CONFIRM_COUNT": 1,
     })
     with app.app_context():
+        db.drop_all()  # leftovers from an interrupted run (matters for a real database server)
         db.create_all()
     result = app.test_cli_runner().invoke(args=["seed"])
     assert result.exit_code == 0, result.output
