@@ -17,3 +17,11 @@ venv/
 
 # YOLO Model
 models/*.pt
+
+# Local runtime data
+instance/
+storage/
+
+# Python caches
+__pycache__/
+.pytest_cache/
