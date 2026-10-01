@@ -1,78 +1,40 @@
 import React, { useState } from "react";
-import "./Login.css"; 
+import "./Login.css";
 import logo from "../../logo.png";
-import { useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
-
-// =========================================================================
-// 클라우드 (배포용)
-// const API_BASE = "https://capston-bajen.run.goorm.site";
-// =========================================================================
-
-// 로컬 (개발용)
-const API_BASE = "http://localhost:5000";
-
+import { homePath } from "../../utils/format";
 
 export default function Login() {
   const navigate = useNavigate();
-  const {setUser} = useAuth();
+  const { user, ready, login } = useAuth();
 
-  const [id, setId] = useState("");
+  const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // 이미 로그인한 상태라면 Role에 맞는 첫 화면으로 보낸다.
+  if (ready && user) return <Navigate to={homePath(user.role)} replace />;
 
   const onSubmit = async (e) => {
-    e.preventDefault(); // 페이지 새로고침 방지.
+    e.preventDefault(); // 페이지 새로고침 방지
     setError("");
 
-    if (!id.trim() || !pw.trim()) {
-      setError("아이디와 비밀번호를 입력해주세요.");
+    if (!email.trim() || !pw) {
+      setError("이메일과 비밀번호를 입력해주세요.");
       return;
     }
 
-    // 여기에 실제 로그인 API 연동 예정 !
+    setSubmitting(true);
     try {
-      const res = await fetch(`${API_BASE}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials:"include", // 교차출처에서도 쿠키 전송/수신 O
-        body: JSON.stringify({ user_id: id, password: pw }),
-      });
-
-      const data = await res.json();
-
-      // if(data.ok){
-      //   const role=data.user.role;
-      //   // 응답받은 json에서 role이 admin이면 /admin-dashboard로 이동, user면 /user-dashboard로 이동
-      //   navigate(role === "admin" ? "/admin-dashboard" : "/user-dashboard"); 
-      // }else{
-      //   setError(data.error);
-      // }
-
-      if(!data.ok){
-        setError(data.error)
-        return;
-      }
-
-      const sessionRes=await fetch(`${API_BASE}/session`, {credentials:"include"});
-      const session = await sessionRes.json();
-
-      if (session.ok){
-        // 전역 변수 setUser에 세션 정보 저장
-        setUser(session.user);
-
-        // 권한에 따라 페이지 이동
-        const role = session.user.role;
-        navigate(role === "user" ? "/user-dashboard":"/admin-dashboard");
-      }else{
-        setError("로그인에 실패하였습니다."); //세션 확인 실패
-      }
-
-    } 
-    catch (err) {
-      // console.error("서버 오류:", err);
-      setError("서버와 연결할 수 없습니다.");
+      const admin = await login(email.trim(), pw);
+      navigate(homePath(admin.role), { replace: true });
+    } catch (err) {
+      setError(err.message || "로그인에 실패하였습니다.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -83,18 +45,19 @@ export default function Login() {
       <div className="login-card">
         <div className="login-header">
           <img src={logo} alt="Parking Guardian 로고" className="logo-img" />
-          <h1 className="title" translate="no">Parking Guadian</h1>
+          <h1 className="title" translate="no">Parking Guardian</h1>
           <p className="subtitle">장애인 주차 위반 감지 시스템</p>
         </div>
 
-        <form onSubmit={onSubmit} className="form">
+        <form onSubmit={onSubmit} className="form" noValidate>
           <label className="label">
-            <span>아이디</span>
+            <span>이메일</span>
             <input
-              type="text"
-              value={id}
-              onChange={(e) => setId(e.target.value)}
-              placeholder="ID"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="이메일"
+              autoComplete="username"
               className="input"
             />
           </label>
@@ -106,7 +69,8 @@ export default function Login() {
                 type={showPw ? "text" : "password"}
                 value={pw}
                 onChange={(e) => setPw(e.target.value)}
-                placeholder="Password"
+                placeholder="비밀번호"
+                autoComplete="current-password"
                 className="input input-has-button"
               />
               <button
@@ -118,16 +82,15 @@ export default function Login() {
               </button>
             </div>
           </label>
-          
-          {/* &&(AND 연산자)는 앞이 true일 때만 뒤를 실행함. 즉, error값이 존재해야 errobox 렌더링함 */}
-          {error && <div className="error-box">{error}</div>}
 
-            <button type="submit" className="main-login-btn">
-            로그인
-            </button>
+          {error && <div className="error-box" role="alert">{error}</div>}
+          {!ready && <div className="login-hint">이전 로그인 상태를 확인하는 중...</div>}
+
+          <button type="submit" className="main-login-btn" disabled={submitting}>
+            {submitting ? "로그인 중..." : "로그인"}
+          </button>
         </form>
       </div>
     </div>
   );
 }
-
