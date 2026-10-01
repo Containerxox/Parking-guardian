@@ -1,0 +1,18 @@
+# Parking Guardian backend (API server)
+# AI inference dependencies are listed separately in requirements-ai.txt
+Flask>=3.1,<4
+flask-cors>=6.0,<7
+Flask-SQLAlchemy>=3.1,<4
+Flask-Migrate>=4.0,<5
+SQLAlchemy>=2.0,<3
+bcrypt>=4.3,<6
+PyJWT>=2.9,<3
+python-dotenv>=1.0,<2
+tzdata
+requests>=2.32
+
+# PostgreSQL driver (used when DATABASE_URL points to PostgreSQL)
+psycopg[binary]>=3.2,<4
+
+# Tests
+pytest>=8,<10

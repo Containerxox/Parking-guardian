@@ -1,0 +1,11 @@
+# AI inference dependencies (YOLOv5). Needed only when INFERENCE_BACKEND=yolo.
+#
+# 1) CPU build of PyTorch:
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 2) YOLOv5 source next to backend/ (capston/yolov5), then:
+#      pip install -r ../yolov5/requirements.txt
+#
+# Verified locally with: torch 2.14.1+cpu, torchvision 0.29.1+cpu, yolov5 commit 4add2af
+opencv-python>=4.6
+numpy>=1.23.5
+pandas>=1.1.4
