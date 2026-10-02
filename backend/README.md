@@ -53,6 +53,29 @@ python wsgi.py                  # http://127.0.0.1:5000
 
 설정은 `backend/.env` 로 바꾼다. 항목은 `.env.example` 참고. 기본 DB는 `instance/parking_guardian.db` (SQLite) 이고, `DATABASE_URL` 을 주면 PostgreSQL을 쓴다.
 
+## Docker Compose로 전체 실행
+
+Python, Node.js, torch를 설치하지 않고 DB, Backend, Frontend를 한 번에 띄운다. Docker Desktop이 켜져 있어야 한다.
+
+```powershell
+cd C:\parking_guardian\capston
+docker compose up -d --build     # 처음 빌드는 torch를 내려받느라 몇 분 걸린다
+docker compose ps                # backend 가 healthy 가 되면 준비 완료
+docker compose logs -f backend   # 데모 계정과 장비 키가 여기에 출력된다
+docker compose down              # 정지. 데이터까지 지우려면 down -v
+```
+
+| 주소 | 내용 |
+|---|---|
+| http://127.0.0.1:8080 | 화면. `/api/` 로 시작하는 요청은 nginx가 Backend로 넘긴다 |
+| http://127.0.0.1:5000 | Backend API 직접 접근. `scripts\send_detection.py` 가 기본으로 쓰는 주소 |
+
+- 준비물: `backend\models\default.pt`, `backend\models\last.pt`, 저장소 루트의 `yolov5\` 폴더. 모델 없이 띄우려면 `$env:INFERENCE_BACKEND = "mock"` 을 주고 실행한다.
+- 시작할 때 DB 마이그레이션과 데모 데이터 입력이 자동으로 된다.
+- 컨테이너를 띄운 뒤 첫 사진은 모델을 읽느라 약 30초 걸린다. 그다음부터는 약 1초다.
+- `python wsgi.py` 와 같은 5000번 포트를 쓴다. 둘을 같이 띄우려면 `$env:BACKEND_PORT = "5050"` 처럼 포트를 바꾼다. 화면 포트는 `FRONTEND_PORT`.
+- 위반 사진은 `backend_storage` volume에 저장된다.
+
 ## PostgreSQL로 실행
 
 운영 환경과 같은 DB로 돌려 보려면 저장소 루트의 `docker-compose.yml` 로 PostgreSQL 16을 띄운다.

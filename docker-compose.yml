@@ -1,13 +1,17 @@
 # Parking Guardian local environment.
 #
-# For now this only runs PostgreSQL. Backend, frontend, AI inference and the notification worker
-# are added as services in later steps.
+# Runs PostgreSQL, the backend and the frontend. AI inference still runs inside the backend;
+# the separate inference service and the notification worker are added in later steps.
 #
-#   docker compose up -d db        start PostgreSQL
-#   docker compose ps              check that it is healthy
-#   docker compose down            stop (data is kept in the pgdata volume)
+#   docker compose up -d --build   build and start everything
+#   docker compose ps              check that the services are healthy
+#   docker compose logs -f backend follow the backend log
+#   docker compose down            stop (data is kept in the volumes)
 #   docker compose down -v         stop and delete the data
 #
+#   docker compose up -d db        start PostgreSQL only (when running the backend with python wsgi.py)
+#
+# Open http://127.0.0.1:8080 after it starts. Demo accounts are printed in the backend log.
 # The credentials below are for local development only.
 name: parking-guardian
 
@@ -32,5 +36,47 @@ services:
       retries: 10
     restart: unless-stopped
 
+  backend:
+    build:
+      context: ./backend
+      # The YOLOv5 source lives outside backend/ and is not in Git, so it is passed separately.
+      additional_contexts:
+        yolov5: ./yolov5
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-parking}:${POSTGRES_PASSWORD:-parking_dev_password}@db:5432/${POSTGRES_DB:-parking_guardian}
+      SECRET_KEY: ${SECRET_KEY:-dev-only-secret-key-change-me-0123456789}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789}
+      # yolo: real models. mock: no models needed, the verdict comes from the file name.
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-yolo}
+      # Create the demo accounts and machines on start (skips anything that already exists).
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-1}
+    volumes:
+      # Model weights are not in the image (412 MB, not in Git).
+      - ./backend/models:/models:ro
+      # Violation photos. Replaced by S3 in the next step.
+      - backend_storage:/data/storage
+    ports:
+      # Published so scripts/send_detection.py and `npm start` can reach the API directly.
+      - "127.0.0.1:${BACKEND_PORT:-5000}:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  backend_storage:

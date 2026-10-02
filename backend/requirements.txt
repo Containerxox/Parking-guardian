@@ -14,5 +14,8 @@ requests>=2.32
 # PostgreSQL driver (used when DATABASE_URL points to PostgreSQL)
 psycopg[binary]>=3.2,<4
 
+# Production WSGI server (used in the container; gunicorn does not run on Windows)
+gunicorn>=23; sys_platform != "win32"
+
 # Tests
 pytest>=8,<10

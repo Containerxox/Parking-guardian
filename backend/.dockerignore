@@ -1,0 +1,24 @@
+# Keep the build context small and keep local-only files out of the image.
+
+# Local Python environment and caches
+venv/
+__pycache__/
+.pytest_cache/
+
+# Local settings and runtime data
+.env
+instance/
+storage/
+*.db
+
+# Model weights are mounted at run time, not copied into the image
+models/
+
+# Not needed to run the server
+uploads/
+legacy/
+tests/
+README.md
+Dockerfile
+.dockerignore
+image_send*.py
