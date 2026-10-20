@@ -93,9 +93,31 @@
 .pg-btn-logout:hover{ filter: brightness(1.08); }
 .pg-btn-logout:active{ transform: translateY(1px); }
 
-/* 좁은 화면 대응 */
-@media (max-width: 520px){
-  .pg-appbar-inner{ gap: 8px 10px; }
-  .pg-brand{ font-weight: 700; }
+/* 좁은 화면 대응
+   폰에서는 두 줄로 나눈다. 첫 줄은 브랜드명만 왼쪽에. 둘째 줄은 메뉴, 알림 종, 로그아웃을 화면 폭에
+   맞춰 한 줄에 둔다. 메뉴는 남는 폭을 똑같이 나눠 가지고, 그래도 넘치면(서비스 운영자 메뉴 4개 +
+   로그아웃을 아주 좁은 화면에서) 가로로 스크롤한다. 스크롤바는 숨긴다. */
+@media (max-width: 640px){
+  .pg-appbar-inner{ gap: 6px 8px; min-height: 0; padding: 10px 16px 8px; }
+  .pg-brand{ flex: 1 0 100%; font-size: 17px; }   /* 첫 줄을 혼자 차지한다 */
+  .pg-nav{
+    flex: 1 1 0;          /* 기준 폭 0: 메뉴가 길어도 줄을 바꾸지 않고 남는 폭 안에서 스크롤한다 */
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 2px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .pg-nav::-webkit-scrollbar{ display: none; }
+  .pg-nav-link{ flex: 1 0 auto; text-align: center; white-space: nowrap; padding: 8px 6px; font-size: 13px; }
+  .pg-right{ flex: 0 0 auto; gap: 8px; margin-left: 0; }
   .pg-user{ display: none; }
+  .pg-bell{ width: 38px; height: 38px; }
+  .pg-btn-logout{ padding: 8px 10px; min-height: 38px; font-size: 14px; }
+}
+@media (pointer: coarse){
+  .pg-bell{ width: 42px; height: 42px; }
+  .pg-btn-logout{ min-height: 42px; }
+  .pg-nav-link{ padding-top: 11px; padding-bottom: 11px; } /* 가로 여백은 위 규칙대로 두고 높이만 키운다 */
 }

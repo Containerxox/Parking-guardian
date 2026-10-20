@@ -331,6 +331,68 @@ textarea.pg-input{ resize: vertical; min-height: 96px; }
   margin-top: 4px; font-size: 13px; color: var(--muted);
 }
 
+/* ===== 모바일 대응 =====
+   - dvh: 모바일 브라우저는 주소창 때문에 100vh가 실제 화면보다 크다. 지원하는 브라우저만 덮어쓴다.
+   - 표: 가로 스크롤을 유지하고, 첫 열(이름)을 고정해 어느 행인지 보이게 한다. 오른쪽 가장자리의
+     그림자는 "더 있다"는 표시다 (background-attachment: local 로 스크롤 끝에 닿으면 사라진다).
+   - Modal: 폰에서는 아래에서 올라오는 시트 모양으로 바꾼다.
+   - 터치 기기: 버튼 높이를 손가락 기준(40~44px)으로 키우고, 입력창 글자를 16px로 둬서
+     iOS Safari가 포커스할 때 화면을 확대하지 않게 한다. */
+@supports (height: 100dvh){
+  .pg-page{ min-height: 100dvh; }
+  .pg-modal{ max-height: 92dvh; }
+}
+
+.table-wrap{
+  -webkit-overflow-scrolling: touch;
+  background:
+    linear-gradient(to right, rgba(255,255,255,0), #fff 70%) 100% 0 / 40px 100% no-repeat local,
+    radial-gradient(farthest-side at 100% 50%, rgba(15,23,42,.18), rgba(15,23,42,0)) 100% 0 / 14px 100% no-repeat scroll;
+}
+
 @media (max-width: 640px){
   .pg-toolbar .pg-input{ width: 100%; }
+
+  .pg-table thead th:first-child,
+  .pg-table tbody td:first-child{
+    position: sticky; left: 0; z-index: 1;
+    background: #fff;
+    box-shadow: 1px 0 0 var(--line); /* border-collapse 표에서는 border가 sticky 칸을 따라오지 않아 box-shadow로 그린다 */
+  }
+  .pg-table thead th:first-child{ background: #e8ebee; }
+  .pg-table tbody tr:hover td:first-child{ background: #fafafa; }
+  /* 폰 폭에 맞추려고 열을 좁히면 한국어가 글자 단위로 꺾인다("서울/강남/구"). 칸은 한 줄로 두고
+     표가 넓어지면 가로로 스크롤한다. 아주 긴 내용만 말줄임표로 자른다. */
+  .pg-table tbody td{
+    white-space: nowrap;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pg-table tbody td:first-child{ max-width: 55vw; } /* 고정 열이 화면 절반을 넘지 않게. 감사 로그의 시각(22자)이 들어가는 폭 */
+  .pg-table tbody td:has(.pg-cell-actions){ max-width: none; } /* 버튼 칸은 자르면 버튼이 사라지므로 제한하지 않는다 */
+  .pg-cell-actions{ flex-wrap: nowrap; }
+  .pg-table pre{ max-width: 100%; }
+
+  .pg-modal-overlay{ align-items: flex-end; padding: 0; }
+  .pg-modal,
+  .pg-modal.is-wide{
+    max-width: none;
+    max-height: 94vh;
+    border-radius: 16px 16px 0 0;
+  }
+  @supports (height: 100dvh){
+    .pg-modal, .pg-modal.is-wide{ max-height: 94dvh; }
+  }
+  .pg-modal-head{ position: sticky; top: 0; background: #fff; z-index: 1; }
+  .pg-modal-foot .btn{ flex: 1 1 auto; }
+}
+
+@media (pointer: coarse){
+  .btn{ min-height: 44px; }
+  .btn-sm{ min-height: 40px; }
+  .pg-tab{ min-height: 40px; }
+  .pg-input{ min-height: 44px; font-size: 16px; }
+  .pg-check input{ width: 20px; height: 20px; }
+  .noti-main{ min-height: 44px; }
 }

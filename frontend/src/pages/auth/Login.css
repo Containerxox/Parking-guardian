@@ -161,7 +161,14 @@
 }
 
 /* ===== 반응형 ===== */
+@supports (height: 100dvh) {
+  .login-wrap { min-height: 100dvh; }
+}
 @media (max-width: 420px) {
   .login-card { padding: 22px; }
   .title { font-size: 24px; }
+}
+/* 터치 기기: 입력창 글자가 16px보다 작으면 iOS Safari가 포커스할 때 화면을 확대한다 */
+@media (pointer: coarse) {
+  .input { font-size: 16px; min-height: 44px; }
 }
