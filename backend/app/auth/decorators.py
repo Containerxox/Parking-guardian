@@ -17,6 +17,7 @@ from ..models import Admin, Machine, Role, Status, utcnow
 from .security import decode_token, sha256_hex
 
 
+# 관리자 JWT 인증
 def require_auth(*roles: str):
     """Require a valid access token. With roles given, also require one of those roles."""
 
@@ -33,7 +34,7 @@ def require_auth(*roles: str):
             except jwt.InvalidTokenError:
                 raise unauthorized("유효하지 않은 인증 정보입니다.")
 
-            admin = db.session.get(Admin, int(payload["sub"]))
+            admin = db.session.get(Admin, int(payload["sub"])) # JWT에 있는 사용자ID로 DB 조회
             if admin is None or admin.status != Status.ACTIVE:
                 raise unauthorized("사용할 수 없는 계정입니다.")
             if admin.role == Role.COMPANY_ADMIN and admin.company.status != Status.ACTIVE:
@@ -49,6 +50,7 @@ def require_auth(*roles: str):
     return decorator
 
 
+# 라즈베리파이/장비 API Key 인증 (아무 장비나 서버로 요청을 보내면 안되니까 API KEY를 사용했음)
 def require_device(view):
     """Authenticate a machine by its API key (X-Device-Key)."""
 
@@ -70,6 +72,7 @@ def require_device(view):
 
 
 # --- Tenant scope ------------------------------------------------------------
+# 목록 조회 시 회사 범위 제한
 def scoped_company_id(requested=None) -> int | None:
     """Company filter to apply to a list query.
 
@@ -85,13 +88,14 @@ def scoped_company_id(requested=None) -> int | None:
     return requested_id
 
 
+# 특정 리소스 조회 시 다른 회사 데이터 차단
 def ensure_company_access(company_id: int | None) -> None:
     """Call after loading a resource by id. Hides other companies' resources behind a 404."""
     admin: Admin = g.admin
     if admin.role == Role.COMPANY_ADMIN and company_id != admin.company_id:
         raise not_found()
 
-
+# company_id 숫자 변환
 def _to_int(value) -> int | None:
     if value is None or value == "":
         return None
@@ -100,11 +104,11 @@ def _to_int(value) -> int | None:
     except (TypeError, ValueError):
         raise ApiError(400, "validation_error", "company_id 형식이 올바르지 않습니다.")
 
-
+# 장비가 살아있다는 마지막 시간 기록
 def touch_heartbeat(machine: Machine) -> None:
     machine.last_heartbeat_at = utcnow()
 
-
+# 장비가 현재 온라인인지 확인
 def machine_online(machine: Machine) -> bool:
     from ..models import as_utc
 
