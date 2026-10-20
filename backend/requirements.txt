@@ -1,5 +1,5 @@
 # Parking Guardian backend (API server)
-# AI inference dependencies are listed separately in requirements-ai.txt
+# AI inference (torch, YOLOv5) is installed separately; see README.md
 Flask>=3.1,<4
 flask-cors>=6.0,<7
 Flask-SQLAlchemy>=3.1,<4

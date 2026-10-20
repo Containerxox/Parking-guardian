@@ -16,9 +16,7 @@ models/
 
 # Not needed to run the server
 uploads/
-legacy/
 tests/
 README.md
 Dockerfile
 .dockerignore
-image_send*.py

@@ -79,7 +79,7 @@ class MockInference:
 
 
 class YoloInference:
-    """Two-stage detection, same idea as the legacy process_model.py:
+    """Two-stage detection, same idea as the original capstone process_model.py (git tag legacy-capstone):
 
     1. Find windshields in the full image, keep only the windshield class, pick the largest box.
     2. Crop that box and look for a disabled-parking sticker inside the crop.

@@ -2,7 +2,7 @@
 
 Multi-Tenant 구조의 Flask API 서버다. 장비가 올린 사진을 AI로 판정하고, 위반이면 사건을 저장한 뒤 해당 주차장의 담당 관리자에게 알린다.
 
-API 규격은 `docs/design/API.md` 를 따른다. 기존 단일 파일 서버는 비교용으로 `legacy/` 에 남겨 두었다.
+API는 `/api/v1` 아래에 있고 라우트별 구현은 `app/api/` 에 있다. 리팩터링 이전의 단일 파일 서버는 Git 태그 `legacy-capstone` 에서 볼 수 있다.
 
 ## 구조
 
@@ -18,11 +18,11 @@ backend/
 │  ├─ services/            Violation 상태 전이, 알림 대상 결정, Audit Log
 │  ├─ adapters/            추론(YOLOv5 / mock), 이미지 저장(로컬), 알림 발행(동기)
 │  └─ cli.py               flask seed
-├─ migrations/             Alembic
+├─ migrations/             Alembic. 시작 시 flask db upgrade 로 적용
 ├─ scripts/send_detection.py   장비(Raspberry Pi) 역할의 업로드 스크립트
 ├─ tests/                  pytest
-├─ models/                 best.pt, last.pt (Git 제외)
-└─ legacy/                 리팩터링 이전 코드
+├─ uploads/                실제 모델 확인용 샘플 사진 3장
+└─ models/                 default.pt(앞유리), last.pt(스티커). Git 제외
 ```
 
 ## 처음 한 번
@@ -34,10 +34,11 @@ python -m venv venv
 pip install -r requirements.txt
 
 # AI 추론까지 쓰려면 (없으면 INFERENCE_BACKEND=mock 으로 실행)
+# 확인된 조합: torch 2.14.1+cpu, torchvision 0.29.1+cpu, yolov5 commit 4add2af
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 git clone https://github.com/ultralytics/yolov5 ..\yolov5
-pip install -r ..\yolov5\requirements.txt
-# models\best.pt (앞유리), models\last.pt (스티커) 를 넣는다
+pip install -r ..\yolov5\requirements.txt       # opencv, numpy, pandas 포함
+# models\default.pt (앞유리), models\last.pt (스티커) 를 넣는다
 
 flask --app wsgi db upgrade     # Table 생성
 flask --app wsgi seed           # 데모 데이터 입력, 계정과 장비 키가 출력된다
