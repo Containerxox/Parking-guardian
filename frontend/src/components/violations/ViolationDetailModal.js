@@ -9,14 +9,16 @@ import { HISTORY_ACTION_LABEL, formatDateTime, vehiclePresenceText } from "../..
 
 // 위반 한 건의 큰 이미지와 처리 이력(GET /violations/{id})을 보여 준다.
 // onAction(kind, violation): kind 는 "acknowledge" | "resolve" | "reopen"
-export default function ViolationDetailModal({ violationId, showCompany, canReopen, onAction, onClose }) {
+// canHandle: 현장 조치(확인, 처리 완료) 버튼을 보여 줄지. 현장 조치는 주차장 관리자(COMPANY_ADMIN)의 일이라
+//            서비스 운영자(SUPER_ADMIN) 화면에서는 숨긴다. 조회와 "상태 복구"(canReopen)는 그대로다.
+export default function ViolationDetailModal({ violationId, showCompany, canHandle = true, canReopen, onAction, onClose }) {
   const loader = useCallback(() => violationsApi.get(violationId), [violationId]);
   const { data: violation, loading, error, reload } = useLoad(loader);
 
   let footer = null;
   if (violation) {
     const status = violation.status;
-    const canAcknowledge = status === "DETECTED" || status === "NOTIFIED";
+    const canAcknowledge = canHandle && (status === "DETECTED" || status === "NOTIFIED");
     const isOpen = status !== "RESOLVED";
     footer = (
       <>
@@ -25,7 +27,7 @@ export default function ViolationDetailModal({ violationId, showCompany, canReop
             확인 (현장 대응 시작)
           </button>
         )}
-        {isOpen && (
+        {isOpen && canHandle && (
           <button type="button" className="btn btn-primary" onClick={() => onAction("resolve", violation)}>
             처리 완료
           </button>

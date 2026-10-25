@@ -24,7 +24,7 @@ const noCompanies = () => Promise.resolve(null);
 const LOT_MINE = "mine";
 
 // 위반 목록 화면의 본문. COMPANY_ADMIN 과 SUPER_ADMIN 이 함께 쓴다.
-// scope="super" 이면 회사 필터와 "상태 복구" 버튼이 추가된다.
+// scope="super" 이면 회사 필터와 "상태 복구" 버튼이 추가되고, 현장 조치 버튼(확인, 처리 완료)은 숨긴다.
 // scope="company" 이면 주차장 필터에 내 담당 주차장만 나오고, 목록도 담당 주차장의 위반만 보여 준다.
 export default function ViolationBoard({ scope = "company" }) {
   const isSuper = scope === "super";
@@ -221,7 +221,9 @@ export default function ViolationBoard({ scope = "company" }) {
             ) : (
               items.map((v) => {
                 const isOpen = v.status !== "RESOLVED";
-                const canAcknowledge = v.status === "DETECTED" || v.status === "NOTIFIED";
+                // 현장 조치(확인, 처리 완료)는 주차장 관리자의 일이다. 서비스 운영자 화면에서는 버튼을 숨긴다.
+                const canAcknowledge = !isSuper && (v.status === "DETECTED" || v.status === "NOTIFIED");
+                const canResolve = !isSuper && isOpen;
                 const busy = busyId === v.id;
                 return (
                   <div
@@ -273,7 +275,7 @@ export default function ViolationBoard({ scope = "company" }) {
                           {busy ? "처리 중..." : "확인 (현장 대응 시작)"}
                         </button>
                       )}
-                      {isOpen && (
+                      {canResolve && (
                         <button
                           type="button"
                           className="btn btn-sm btn-primary"
@@ -307,6 +309,7 @@ export default function ViolationBoard({ scope = "company" }) {
         <ViolationDetailModal
           violationId={detailId}
           showCompany={isSuper}
+          canHandle={!isSuper}
           canReopen={isSuper}
           onAction={handleDetailAction}
           onClose={() => setDetailId(null)}
