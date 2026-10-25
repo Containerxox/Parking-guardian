@@ -114,9 +114,10 @@ def test_long_silence_closes_the_episode_and_restarts_counting(real_rules, app, 
     upload(GANGNAM)
     first_id = upload(GANGNAM).get_json()["violation_id"]
 
-    with app.app_context():  # the device was offline for 30 minutes
+    with app.app_context():  # the device was offline for 30 minutes: no photo and no heartbeat
         machine = db.session.scalar(select(Machine).where(Machine.serial_number == GANGNAM))
         machine.last_detection_at = utcnow() - timedelta(minutes=30)
+        machine.last_heartbeat_at = utcnow() - timedelta(minutes=30)
         db.session.commit()
 
     back = upload(GANGNAM)
@@ -124,6 +125,61 @@ def test_long_silence_closes_the_episode_and_restarts_counting(real_rules, app, 
     detail = client.get(f"{API}/violations/{first_id}", headers=auth("kim@a.com")).get_json()
     assert detail["end_reason"] == "SIGNAL_LOST" and detail["history"][-1]["action"] == "SIGNAL_LOST"
     assert upload(GANGNAM).status_code == 201
+
+
+def test_heartbeats_keep_the_episode_alive_between_sparse_photos(real_rules, app, client, auth, upload):
+    """An event-mode device photographs a parked car only every 10 minutes but heartbeats every minute."""
+    upload(GANGNAM, event="arrived")
+    violation_id = upload(GANGNAM, event="confirm").get_json()["violation_id"]
+
+    with app.app_context():  # last photo 30 minutes ago, but the device kept sending heartbeats
+        machine = db.session.scalar(select(Machine).where(Machine.serial_number == GANGNAM))
+        machine.last_detection_at = utcnow() - timedelta(minutes=30)
+        machine.last_heartbeat_at = utcnow() - timedelta(minutes=1)
+        db.session.commit()
+
+    refresh = upload(GANGNAM, event="refresh").get_json()
+    assert refresh["result"] == "violation_ongoing" and refresh["violation_id"] == violation_id
+    detail = client.get(f"{API}/violations/{violation_id}", headers=auth("kim@a.com")).get_json()
+    assert detail["vehicle_present"] is True and detail["end_reason"] is None
+
+
+def test_left_photo_of_an_empty_space_ends_the_episode_at_once(real_rules, client, auth, upload):
+    """In event mode no photo follows `left`, so waiting for three empty photos would leak the episode
+    into the next car."""
+    upload(GANGNAM, event="arrived")
+    first_id = upload(GANGNAM, event="confirm").get_json()["violation_id"]
+
+    left = upload(GANGNAM, "novehicle.jpg", event="left").get_json()
+    assert left["result"] == "no_vehicle" and left["episode_ended"] is True
+    detail = client.get(f"{API}/violations/{first_id}", headers=auth("kim@a.com")).get_json()
+    assert detail["vehicle_present"] is False and detail["end_reason"] == "VEHICLE_LEFT"
+
+    # the next car is a new episode that goes through confirmation again
+    assert upload(GANGNAM, event="arrived").get_json()["result"] == "violation_pending"
+    second = upload(GANGNAM, event="confirm")
+    assert second.status_code == 201 and second.get_json()["violation_id"] != first_id
+
+
+def test_left_photo_ends_nothing_unless_the_server_sees_no_vehicle(real_rules, client, auth, upload):
+    """`left` is the device's opinion. If the server still sees a car (or a sticker) on that photo,
+    the normal rules apply: an ongoing violation stays, a sticker needs three photos in a row."""
+    upload(GANGNAM, event="arrived")
+    violation_id = upload(GANGNAM, event="confirm").get_json()["violation_id"]
+
+    still_there = upload(GANGNAM, event="left").get_json()
+    assert still_there["result"] == "violation_ongoing" and still_there["violation_id"] == violation_id
+
+    sticker = upload(GANGNAM, "permitted.jpg", event="left").get_json()
+    assert sticker["result"] == "permitted" and "episode_ended" not in sticker
+    detail = client.get(f"{API}/violations/{violation_id}", headers=auth("kim@a.com")).get_json()
+    assert detail["vehicle_present"] is True
+
+
+def test_unknown_event_value_is_rejected(client, upload):
+    response = upload(GANGNAM, event="departed")
+    assert response.status_code == 400
+    assert "event" in response.get_json()["error"]["message"]
 
 
 def test_machines_are_tracked_separately(real_rules, client, auth, upload):

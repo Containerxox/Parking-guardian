@@ -37,6 +37,8 @@ class Config:
     # --- Images ---
     IMAGE_STORAGE_DIR = os.environ.get("IMAGE_STORAGE_DIR", str(BASE_DIR / "storage"))
     IMAGE_URL_TTL_SECONDS = int(os.environ.get("IMAGE_URL_TTL_SECONDS", "300"))
+    # Only sets violations.image_expires_at when a photo is stored. Nothing deletes photos or marks them
+    # EXPIRED yet; that is planned for the S3 storage step.
     IMAGE_RETENTION_DAYS = int(os.environ.get("IMAGE_RETENTION_DAYS", "90"))
     MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "15")) * 1024 * 1024
 
@@ -67,5 +69,7 @@ class Config:
     EPISODE_GAP_MINUTES = int(os.environ.get("EPISODE_GAP_MINUTES", "10"))
 
     # --- Notifications ---
+    # Not read anywhere yet: channels come from models.Channel.ALL and e-mail always goes to the
+    # console logger (adapters/notifier.py). Kept as the place for the SES/SQS step to plug in.
     NOTIFICATION_CHANNELS = ("IN_APP", "EMAIL")
     EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "console")  # console | ses (later phase)

@@ -4,10 +4,12 @@ Flow of POST /device/detections:
   1. Authenticate the machine by API key. Its parking lot and company come from the database,
      never from the request, so a device cannot write into another tenant.
   2. Run inference on the photo.
-  3. Hand the verdict to the episode service (services/detections.py). A device uploads every
-     minute, so most photos only update an existing violation or a counter.
+  3. Hand the verdict to the episode service (services/detections.py). An interval-mode device
+     uploads every minute, so most photos only update an existing violation or a counter. An
+     event-mode device tags each photo with why it was sent (`event`: arrived / confirm / refresh /
+     left); the verdict still comes from the photo.
   4. Only when a new violation was created: save the image, then publish the notification event.
-     Each of these may fail without undoing the violation (partial failure is recorded).
+     Each of these may fail without undoing the violation (partial failure is recorded as a history line).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -42,6 +44,16 @@ def _parse_detected_at(raw: str | None) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _parse_event(raw: str | None) -> str | None:
+    """Optional `event` form field of an event-mode device. Absent means an interval-mode photo."""
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    if value not in detections.EVENTS:
+        raise bad_request("event 값은 arrived, confirm, refresh, left 중 하나여야 합니다.")
+    return value
+
+
 @bp.post("/device/heartbeat")
 @require_device
 def heartbeat():
@@ -61,6 +73,7 @@ def create_detection():
     if not image_bytes:
         raise bad_request("빈 파일입니다.")
     detected_at = _parse_detected_at(request.form.get("detected_at"))
+    event = _parse_event(request.form.get("event"))
 
     # 1. Inference
     try:
@@ -72,7 +85,8 @@ def create_detection():
         raise ApiError(503, "inference_unavailable", "AI 추론을 수행할 수 없습니다. 잠시 후 다시 시도해 주세요.")
 
     # 2. Episode logic: is this a new violation, the same vehicle again, or nothing?
-    outcome = detections.record_verdict(machine.id, result.verdict, detected_at, request.form.get("zone_name"))
+    outcome = detections.record_verdict(machine.id, result.verdict, detected_at, request.form.get("zone_name"),
+                                        event=event)
     body = {"result": outcome.result, "inference": result.to_dict()}
     if outcome.violation is not None:
         body["violation_id"] = outcome.violation.id

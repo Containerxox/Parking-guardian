@@ -70,7 +70,7 @@ export default function ViolationDetailModal({ violationId, showCompany, canReop
               <dt>차량</dt>
               <dd>{vehiclePresenceText(violation)}</dd>
               <dt>탐지 횟수</dt>
-              <dd>{violation.detection_count ?? 1}회 (장비가 1분마다 확인)</dd>
+              <dd>{violation.detection_count ?? 1}회 (장비가 보낸 사진 중 위반으로 판정된 수)</dd>
               {violation.status === "RESOLVED" && (
                 <>
                   <dt>처리 시각</dt>

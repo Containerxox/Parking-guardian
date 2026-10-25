@@ -1,7 +1,8 @@
-"""Turn a stream of per-minute verdicts from one machine into violation episodes.
+"""Turn the stream of photo verdicts from one machine into violation episodes.
 
-A device photographs its parking space every minute, so one parked vehicle produces many photos.
-The rule is "one parked vehicle = one violation", like a guard who looks once a minute:
+A device photographs its parking space again and again (every minute in interval mode; on occupancy
+changes and every few minutes while a car stays in event mode), so one parked vehicle produces many
+photos. The rule is "one parked vehicle = one violation", like a guard who looks in regularly:
 
   1. Seeing a violation VIOLATION_CONFIRM_COUNT times in a row opens a violation (one notification).
      A single sighting is only remembered: it may be a wrong verdict or a car that stops briefly.
@@ -9,8 +10,14 @@ The rule is "one parked vehicle = one violation", like a guard who looks once a 
      This holds even after an admin resolved it: the vehicle is still the same one.
   3. Not seeing a violation VEHICLE_CLEAR_COUNT times in a row ends the episode (vehicle left, or a
      sticker was seen in the same space). The next confirmed violation is a new one.
-  4. If photos stop for longer than EPISODE_GAP_MINUTES, the open episode is closed as SIGNAL_LOST
-     and counting starts over, because nobody knows what happened in between.
+     A device in event mode (device/pi_client.py, PG_MODE=event) sends one photo of the empty space
+     tagged event=left and then nothing until the next car. If the server sees no vehicle on it, the
+     episode ends on that single photo: the device has already watched the space stay empty for a
+     while, and waiting for more photos would leave the episode open for the next car.
+  4. If the device is silent (no photo and no heartbeat) for longer than EPISODE_GAP_MINUTES, the open
+     episode is closed as SIGNAL_LOST and counting starts over, because nobody knows what happened in
+     between. Heartbeats count as a signal because an event-mode device sends photos only every few
+     minutes while a car is parked.
 
 All state lives on the machine row and the violation row, so the result is the same no matter which
 API instance handles the next photo.
@@ -34,6 +41,13 @@ log = logging.getLogger(__name__)
 RESULT_PENDING = "violation_pending"    # seen, waiting for confirmation
 RESULT_NEW = "violation"                # confirmed: a violation was just created
 RESULT_ONGOING = "violation_ongoing"    # the already-recorded vehicle is still there
+
+# Values a device may send in the "event" form field (event mode). interval mode sends none.
+EVENT_ARRIVED = "arrived"   # occupancy confirmed, first photo of this car
+EVENT_CONFIRM = "confirm"   # new photo taken ~60 s after a violation_pending answer
+EVENT_REFRESH = "refresh"   # periodic photo while the car stays
+EVENT_LEFT = "left"         # occupancy ended, photo of the empty space
+EVENTS = (EVENT_ARRIVED, EVENT_CONFIRM, EVENT_REFRESH, EVENT_LEFT)
 
 
 @dataclass
@@ -73,8 +87,12 @@ def _resolve_zone(machine: Machine, zone_name: str | None) -> ParkingZone | None
     return zones[0] if len(zones) == 1 else None
 
 
-def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_name: str | None = None) -> DetectionOutcome:
+def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_name: str | None = None,
+                   event: str | None = None) -> DetectionOutcome:
     """Apply one photo's verdict to the machine's episode state and commit.
+
+    `event` is the device's reason for sending the photo (one of EVENTS) or None for an interval-mode
+    device. Only EVENT_LEFT changes anything here (rule 3); the verdict always comes from the photo.
 
     Image storage and notification are NOT done here: the caller does them only when
     outcome.created is True, so they happen once per episode.
@@ -92,14 +110,16 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
     machine = db.session.scalar(select(Machine).where(Machine.id == machine_id).with_for_update(of=Machine))
     active = _active_episode(machine.id)
 
-    # Rule 4: a long silence invalidates whatever was being counted.
-    previous = as_utc(machine.last_detection_at)
+    # Rule 4: a long silence invalidates whatever was being counted. The last signal is the later of
+    # the last judged photo and the last heartbeat.
+    signals = [t for t in (as_utc(machine.last_detection_at), as_utc(machine.last_heartbeat_at)) if t is not None]
+    previous = max(signals) if signals else None
     if previous is not None and now - previous > gap:
         if active is not None:
             last_seen = as_utc(active.last_seen_at) or previous
             minutes = int((now - previous).total_seconds() // 60)
             _end_episode(active, EndReason.SIGNAL_LOST, last_seen,
-                         f"장비에서 {minutes}분 동안 사진이 들어오지 않아 사건을 종료했습니다.")
+                         f"장비에서 {minutes}분 동안 사진도 Heartbeat도 들어오지 않아 사건을 종료했습니다.")
             active = None
         _reset_counters(machine)
 
@@ -149,7 +169,11 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
     ended = False
     if active is not None:  # Rule 3
         machine.clear_count = (machine.clear_count or 0) + 1
-        if machine.clear_count >= clear_count:
+        # The empty-space photo of an event-mode device ends the episode by itself, but only when the
+        # server agrees the space is empty. A sticker on a "left" photo means the device was wrong
+        # about the space being empty, so the normal count applies.
+        needed = 1 if (event == EVENT_LEFT and verdict == NO_VEHICLE) else clear_count
+        if machine.clear_count >= needed:
             if verdict == PERMITTED:
                 _end_episode(active, EndReason.STICKER_DETECTED, now,
                              "같은 자리에서 장애인 스티커가 탐지되어 사건을 종료했습니다. "
