@@ -22,6 +22,7 @@ export const HISTORY_ACTION_LABEL = {
   REOPENED: "상태 복구",
   IMAGE_UPLOAD_FAILED: "이미지 저장 실패",
   NOTIFY_FAILED: "알림 전송 실패",
+  OCR_FAILED: "번호판 인식 실패",
   VEHICLE_LEFT: "차량 이탈",
   SIGNAL_LOST: "신호 끊김",
 };

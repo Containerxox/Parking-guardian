@@ -25,3 +25,6 @@ storage/
 # Python caches
 __pycache__/
 .pytest_cache/
+
+# Licence plate OCR models (EasyKoreanLpDetector), downloaded separately like the YOLO models
+models/lp_models/

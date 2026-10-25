@@ -45,6 +45,8 @@ ENV FLASK_APP=wsgi \
     YOLOV5_DIR=/opt/yolov5 \
     WINDOW_MODEL_PATH=/models/default.pt \
     STICKER_MODEL_PATH=/models/last.pt \
+    OCR_PLATE_MODEL_PATH=/models/lp_det.pt \
+    OCR_RECOG_DIR=/models/lp_models \
     IMAGE_STORAGE_DIR=/data/storage
 
 EXPOSE 5000

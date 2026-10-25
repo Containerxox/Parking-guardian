@@ -71,6 +71,12 @@ export default function ViolationDetailModal({ violationId, showCompany, canReop
               <dd>{vehiclePresenceText(violation)}</dd>
               <dt>탐지 횟수</dt>
               <dd>{violation.detection_count ?? 1}회 (장비가 보낸 사진 중 위반으로 판정된 수)</dd>
+              <dt>번호판</dt>
+              <dd>
+                {violation.plate_number
+                  ? `${violation.plate_number} (인식 신뢰도 ${Math.round((violation.plate_confidence ?? 0) * 100)}%)`
+                  : "-"}
+              </dd>
               {violation.status === "RESOLVED" && (
                 <>
                   <dt>처리 시각</dt>

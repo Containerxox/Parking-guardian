@@ -8,8 +8,9 @@ Flow of POST /device/detections:
      uploads every minute, so most photos only update an existing violation or a counter. An
      event-mode device tags each photo with why it was sent (`event`: arrived / confirm / refresh /
      left); the verdict still comes from the photo.
-  4. Only when a new violation was created: save the image, then publish the notification event.
-     Each of these may fail without undoing the violation (partial failure is recorded as a history line).
+  4. Only when a new violation was created: save the image, read the licence plate (OCR, if enabled),
+     then publish the notification event. Each of these may fail without undoing the violation
+     (partial failure is recorded as a history line).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -116,6 +117,28 @@ def create_detection():
         violation_service.add_history(violation_id, HistoryAction.IMAGE_UPLOAD_FAILED,
                                       "차량 사진 저장에 실패했습니다. 사건 기록은 유지됩니다.")
         db.session.commit()
+
+    # 3b. Plate OCR, only for this one photo (ADR 0015). Off by default. Failure or "no plate" leaves the
+    #     columns empty and adds a history line; the violation and its notification are not affected.
+    ocr = adapters.ocr()
+    if ocr.enabled:
+        try:
+            reading = ocr.read(image_bytes)
+            violation = db.session.get(Violation, violation_id)
+            violation.plate_number = reading.plate_number
+            violation.plate_confidence = reading.confidence
+            if reading.plate_number is None:
+                violation_service.add_history(violation_id, HistoryAction.OCR_FAILED,
+                                              "번호판을 읽지 못했습니다. 사건 기록은 유지됩니다.")
+            else:
+                body["plate_number"] = reading.plate_number
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            log.exception("plate OCR failed (violation=%s)", violation_id)
+            violation_service.add_history(violation_id, HistoryAction.OCR_FAILED,
+                                          "번호판 인식에 실패했습니다. 사건 기록은 유지됩니다.")
+            db.session.commit()
 
     # 4. Notification event, once per episode. A failure here must never fail the detection itself.
     try:

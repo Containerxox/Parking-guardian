@@ -32,6 +32,11 @@ class Violation(db.Model):
     image_status = db.Column(db.String(20), nullable=False, default=ImageStatus.PENDING)
     image_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Plate OCR of the confirming photo (ADR 0015). NULL when OCR is off, found no plate, or failed.
+    # A supporting detail for the admin, never an input to episode grouping.
+    plate_number = db.Column(db.String(20), nullable=True)
+    plate_confidence = db.Column(db.Float, nullable=True)
+
     resolved_at = db.Column(db.DateTime(timezone=True), nullable=True)
     resolved_by = db.Column(db.Integer, db.ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
     resolution_note = db.Column(db.Text, nullable=True)
