@@ -11,3 +11,7 @@ yolov5/
 # Python caches
 __pycache__/
 .pytest_cache/
+
+# Device-side detector weights (downloaded/exported on the machine, like backend/models)
+device/*.pt
+device/*_ncnn_model/
