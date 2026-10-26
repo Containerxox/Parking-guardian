@@ -35,6 +35,11 @@ class Config:
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
 
     # --- Images ---
+    # local: files under IMAGE_STORAGE_DIR. s3: objects in S3_BUCKET (ADR 0016). See adapters/storage.py
+    STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local")  # local | s3
+    S3_BUCKET = os.environ.get("S3_BUCKET", "")
+    S3_PREFIX = os.environ.get("S3_PREFIX", "")
+    AWS_REGION = os.environ.get("AWS_REGION")  # optional; boto3 also reads it from the environment
     IMAGE_STORAGE_DIR = os.environ.get("IMAGE_STORAGE_DIR", str(BASE_DIR / "storage"))
     IMAGE_URL_TTL_SECONDS = int(os.environ.get("IMAGE_URL_TTL_SECONDS", "300"))
     # Only sets violations.image_expires_at when a photo is stored. Nothing deletes photos or marks them
