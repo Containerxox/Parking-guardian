@@ -99,7 +99,7 @@ python wsgi.py
 
 ## 데모 계정
 
-비밀번호는 모두 `Passw0rd!` 다.
+비밀번호는 모두 `Passw0rd!` 다(로컬 기본값). 인터넷에 열린 서버에서는 `flask seed` 전에 `SEED_ADMIN_PASSWORD` 와 `SEED_DEVICE_KEY_SECRET` 을 주어 초기 비밀번호와 데모 장비 키를 바꾼다. 시드는 없는 것만 만들기 때문에 다시 실행해도 기존 계정의 비밀번호와 기존 장비의 키는 그대로다. 데모 장비 키는 `flask --app wsgi device-key RPI-A-GANGNAM-01` 로 확인한다.
 
 | Role | 이메일 | 회사 | 담당 주차장 |
 |---|---|---|---|
@@ -119,7 +119,7 @@ python scripts\send_detection.py --heartbeat
 
 실제 장비용 스크립트는 `device/pi_client.py` 에 있다. PC에서 `--image` 옵션으로 같은 시험을 할 수 있다.
 
-데모 장비 시리얼: `RPI-A-GANGNAM-01`, `RPI-A-PANGYO-01`, `RPI-A-SUWON-01`, `RPI-B-HQ-01`, `RPI-B-LOGIS-01`
+데모 장비 시리얼: `RPI-A-GANGNAM-01`, `RPI-A-PANGYO-01`, `RPI-A-SUWON-01`, `RPI-B-HQ-01`, `RPI-B-LOGIS-01`. `--serial` 만 주면 로컬 고정 키(`pgk_dev_<serial>`)를 쓴다. 서버가 `SEED_DEVICE_KEY_SECRET` 으로 시드됐다면 `--key <flask device-key 결과>` 를 준다(`scripts/measure.py` 도 같다).
 
 장비는 1분마다 사진을 올리므로, 서버는 같은 장비의 연속된 판정을 하나의 사건으로 묶는다 (주차 한 번 = 위반 한 건). 규칙은 `app/services/detections.py` 에 있다.
 

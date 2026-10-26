@@ -30,7 +30,7 @@ docker compose down              # 정지. 데이터까지 지우려면 down -v
 
 - 화면: http://127.0.0.1:8080
 - API: http://127.0.0.1:5000/api/v1
-- 데모 계정 비밀번호는 모두 `Passw0rd!`. 서비스 운영자 `super@pg.local`, 회사 관리자 `kim@a.com`, `park@a.com`, `choi@b.com`.
+- 데모 계정 비밀번호는 모두 `Passw0rd!`(로컬 기본값. 공개 서버는 `SEED_ADMIN_PASSWORD`, `SEED_DEVICE_KEY_SECRET` 으로 바꾼다, `backend/.env.example`). 서비스 운영자 `super@pg.local`, 회사 관리자 `kim@a.com`, `park@a.com`, `choi@b.com`.
 - 실제 AI 판정을 쓰려면 모델 파일 `backend/models/default.pt`, `backend/models/last.pt` 와 저장소 루트의 `yolov5/` 폴더가 필요하다(둘 다 Git에 없다). 없으면 `INFERENCE_BACKEND=mock` 으로 띄우면 파일 이름으로 판정을 흉내 낸다.
 
 장비 없이 업로드를 시험하려면:

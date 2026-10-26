@@ -19,6 +19,43 @@ def _default_database_url() -> str:
     return "sqlite:///" + (BASE_DIR / "instance" / "parking_guardian.db").as_posix()
 
 
+def build_database_url(host: str, port: str = "5432", name: str = "parking_guardian", user: str = "parking",
+                       password: str = "", sslmode: str = "require") -> str:
+    """Assemble a PostgreSQL URL from separate parts.
+
+    Used when the password comes from a secret store (RDS-managed password via Secrets Manager) and the
+    host from somewhere else (Terraform output). Quoting here means a generated password may contain
+    any character; nothing outside the app has to URL-encode it.
+    """
+    from urllib.parse import quote
+
+    auth = quote(user, safe="")
+    if password:
+        auth += ":" + quote(password, safe="")
+    url = f"postgresql+psycopg://{auth}@{host}:{port}/{name}"
+    if sslmode:
+        url += f"?sslmode={sslmode}"
+    return url
+
+
+def _database_url() -> str:
+    """DATABASE_URL wins. Otherwise DB_HOST + DB_* parts (EKS). Otherwise the local SQLite file."""
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    host = os.environ.get("DB_HOST")
+    if host:
+        return build_database_url(
+            host,
+            port=os.environ.get("DB_PORT", "5432"),
+            name=os.environ.get("DB_NAME", "parking_guardian"),
+            user=os.environ.get("DB_USER", "parking"),
+            password=os.environ.get("DB_PASSWORD", ""),
+            sslmode=os.environ.get("DB_SSLMODE", "require"),
+        )
+    return _default_database_url()
+
+
 class Config:
     # --- Security ---
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-secret-change-me")
@@ -31,7 +68,7 @@ class Config:
     CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 
     # --- Database ---
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", _default_database_url())
+    SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
 
     # --- Images ---

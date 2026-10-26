@@ -1,4 +1,21 @@
-"""Developer commands: `flask seed` creates demo data for local runs."""
+"""Developer commands.
+
+    flask seed                 create the demo data (skips anything that already exists)
+    flask device-key SERIAL    print the key a seeded demo machine uses (for PG_DEVICE_KEY)
+
+Two secrets shape the demo data. Without them the fixed local values are used, which is fine on a
+developer PC. On a public server set both (they arrive through Secrets Manager → Kubernetes Secret):
+
+    SEED_ADMIN_PASSWORD      initial password of the seeded admin accounts (default Passw0rd!)
+    SEED_DEVICE_KEY_SECRET   the demo machine keys are derived from it with HMAC (default pgk_dev_<serial>)
+
+Re-running `seed` never changes an existing account's password hash or an existing machine's key hash.
+Changing the secrets therefore only affects rows that do not exist yet.
+"""
+import hashlib
+import hmac
+import os
+
 import click
 from sqlalchemy import select
 
@@ -7,6 +24,10 @@ from .extensions import db
 from .models import Admin, AdminParkingLot, Company, Machine, ParkingLot, ParkingZone, Role
 
 DEMO_PASSWORD = "Passw0rd!"
+
+
+def seed_password() -> str:
+    return os.environ.get("SEED_ADMIN_PASSWORD") or DEMO_PASSWORD
 
 # company -> admins, lots (zones, machine), and which admin is responsible for which lot
 DEMO = [
@@ -34,17 +55,33 @@ DEMO = [
 
 
 def dev_api_key(serial_number: str) -> str:
-    """Fixed, predictable key for seeded demo machines only. Real machines get a random key."""
+    """Key of a seeded demo machine. Real machines get a random key at registration.
+
+    With SEED_DEVICE_KEY_SECRET the key is derived (pgk_ + 32 hex chars of HMAC-SHA256), so it is not
+    guessable from the serial number and can be recomputed by whoever holds the secret. Without it the
+    fixed local value is returned.
+    """
+    secret = os.environ.get("SEED_DEVICE_KEY_SECRET")
+    if secret:
+        digest = hmac.new(secret.encode("utf-8"), serial_number.upper().encode("utf-8"), hashlib.sha256)
+        return "pgk_" + digest.hexdigest()[:32]
     return f"pgk_dev_{serial_number.lower()}"
 
 
 def register_cli(app) -> None:
+    @app.cli.command("device-key")
+    @click.argument("serial")
+    def device_key(serial: str):
+        """Print the demo device key for SERIAL (computed, not read from the database)."""
+        click.echo(dev_api_key(serial))
+
     @app.cli.command("seed")
     def seed():
         """Create a SUPER_ADMIN and two demo companies (skips anything that already exists)."""
+        password = seed_password()
         if not db.session.scalar(select(Admin).where(Admin.email == "super@pg.local")):
             db.session.add(Admin(email="super@pg.local", name="서비스 운영자", role=Role.SUPER_ADMIN,
-                                 password_hash=hash_password(DEMO_PASSWORD)))
+                                 password_hash=hash_password(password)))
 
         device_keys = []
         for entry in DEMO:
@@ -59,7 +96,7 @@ def register_cli(app) -> None:
                 admin = db.session.scalar(select(Admin).where(Admin.email == email))
                 if admin is None:
                     admin = Admin(email=email, name=name, role=Role.COMPANY_ADMIN, company_id=company.id,
-                                  password_hash=hash_password(DEMO_PASSWORD))
+                                  password_hash=hash_password(password))
                     db.session.add(admin)
                     db.session.flush()
                 admins[email] = admin
@@ -98,13 +135,19 @@ def register_cli(app) -> None:
 
         db.session.commit()
 
+        # Secrets never go to stdout: in a container this output ends up in the log pipeline.
         click.echo("Seed complete.\n")
-        click.echo(f"Login accounts (password for all: {DEMO_PASSWORD})")
+        if os.environ.get("SEED_ADMIN_PASSWORD"):
+            click.echo("Login accounts (initial password: from SEED_ADMIN_PASSWORD, applies to newly created accounts)")
+        else:
+            click.echo(f"Login accounts (password for all: {DEMO_PASSWORD})")
         click.echo("  SUPER_ADMIN    super@pg.local")
         for entry in DEMO:
             for email, name in entry["admins"]:
                 lots_text = ", ".join(entry["assignments"].get(email, []))
                 click.echo(f"  COMPANY_ADMIN  {email:<12} {entry['company']} {name} (담당: {lots_text})")
         click.echo("\nDemo device API keys (X-Device-Key)")
+        derived = bool(os.environ.get("SEED_DEVICE_KEY_SECRET"))
         for company_name, lot_name, serial, key in device_keys:
-            click.echo(f"  {company_name} / {lot_name:<10} {serial:<18} {key}")
+            shown = "(derived from SEED_DEVICE_KEY_SECRET; run: flask device-key " + serial + ")" if derived else key
+            click.echo(f"  {company_name} / {lot_name:<10} {serial:<18} {shown}")

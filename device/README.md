@@ -38,7 +38,7 @@ python3 pi_client.py
 | 환경변수 | 설명 | 기본값 |
 |---|---|---|
 | `PG_SERVER_URL` | 서버 API 주소 | `http://127.0.0.1:5000/api/v1` |
-| `PG_DEVICE_KEY` | 장비 인증 키. 필수 | 없음 |
+| `PG_DEVICE_KEY` | 장비 인증 키. 필수. 실제 장비는 운영자 화면에서 등록할 때 한 번 표시되는 키. 시드로 만든 데모 장비는 서버에서 `flask device-key RPI-A-GANGNAM-01` 로 얻는다(서버에 `SEED_DEVICE_KEY_SECRET` 이 없으면 `pgk_dev_rpi-a-gangnam-01` 같은 고정값, 있으면 그 비밀로 유도한 값. 공개 서버에서는 후자) | 없음 |
 | `PG_ZONE_NAME` | 이 카메라가 보는 구역 이름. 장비가 구역 하나에 연결돼 있으면 생략 | 없음 |
 | `PG_INTERVAL` | `interval` 모드의 촬영 주기(초). `event` 모드는 쓰지 않는다 | 60 |
 | `PG_SEND_WIDTH` | 전송할 사진의 최대 가로 픽셀. 이보다 큰 사진만 줄여서 보낸다 | 1280 |

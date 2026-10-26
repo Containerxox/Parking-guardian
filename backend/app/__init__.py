@@ -4,6 +4,7 @@ from pathlib import Path
 
 from flask import Flask
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .adapters import init_adapters
 from .api import register_blueprints
@@ -21,6 +22,11 @@ def create_app(test_config: dict | None = None) -> Flask:
     if test_config:
         app.config.update(test_config)
     app.json.ensure_ascii = False  # return Korean text as-is
+
+    # One trusted proxy in front (nginx in docker compose, the ALB on AWS). Absolute URLs the app builds
+    # (image URLs via url_for(_external=True)) then use the scheme and host the browser used, so they
+    # come out as https://... behind TLS termination. Direct access without the headers is unaffected.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     _prepare_sqlite_dir(app.config["SQLALCHEMY_DATABASE_URI"])
 

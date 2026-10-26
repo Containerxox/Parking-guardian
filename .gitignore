@@ -15,3 +15,15 @@ __pycache__/
 # Device-side detector weights (downloaded/exported on the machine, like backend/models)
 device/*.pt
 device/*_ncnn_model/
+
+# Secrets: real env files and keys stay on the machine only (.env.example is the template)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Extra sample photos added locally (16 MB, not committed by decision 2026-10-25)
+backend/uploads/sample_d.jpg
+backend/uploads/sample_e.jpg
+backend/uploads/sample_f.jpg
