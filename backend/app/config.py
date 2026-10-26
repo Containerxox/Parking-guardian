@@ -51,13 +51,7 @@ class Config:
     WINDOW_CONF = float(os.environ.get("WINDOW_CONF", "0.25"))
     STICKER_CONF = float(os.environ.get("STICKER_CONF", "0.5"))
     INFERENCE_IMAGE_SIZE = int(os.environ.get("INFERENCE_IMAGE_SIZE", "640"))
-
-    # --- License plate OCR (ADR 0015): runs once, on the photo that confirmed a violation ---
-    OCR_ENABLED = _bool("OCR_ENABLED", False)
-    OCR_BACKEND = os.environ.get("OCR_BACKEND", "easykoreanlp")  # easykoreanlp | mock
-    OCR_PLATE_MODEL_PATH = os.environ.get("OCR_PLATE_MODEL_PATH", str(BASE_DIR / "models" / "lp_det.pt"))
-    OCR_RECOG_DIR = os.environ.get("OCR_RECOG_DIR", str(BASE_DIR / "models" / "lp_models"))
-    OCR_MIN_CONF = float(os.environ.get("OCR_MIN_CONF", "0.5"))
+    # Licence plate OCR settings (OCR_*) were removed with the OCR step (ADR 0017).
 
     # --- Devices ---
     DEVICE_NAIVE_TZ = os.environ.get("DEVICE_NAIVE_TZ", "Asia/Seoul")

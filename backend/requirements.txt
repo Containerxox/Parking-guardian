@@ -17,9 +17,5 @@ psycopg[binary]>=3.2,<4
 # Production WSGI server (used in the container; gunicorn does not run on Windows)
 gunicorn>=23; sys_platform != "win32"
 
-# Licence plate OCR (ADR 0015). Needs torch (installed with the AI stack) and the model files in
-# models/lp_det.pt and models/lp_models/. Only loaded when OCR_ENABLED=true.
-easyocr>=1.7
-
 # Tests
 pytest>=8,<10

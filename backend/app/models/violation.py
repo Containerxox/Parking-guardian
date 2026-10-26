@@ -32,8 +32,9 @@ class Violation(db.Model):
     image_status = db.Column(db.String(20), nullable=False, default=ImageStatus.PENDING)
     image_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
-    # Plate OCR of the confirming photo (ADR 0015). NULL when OCR is off, found no plate, or failed.
-    # A supporting detail for the admin, never an input to episode grouping.
+    # Left over from the licence plate OCR step (ADR 0015, added by migration a3c7e51d9b02). OCR was
+    # removed in ADR 0017; nothing writes these columns any more. They stay so the schema does not
+    # change again. Always NULL for new violations.
     plate_number = db.Column(db.String(20), nullable=True)
     plate_confidence = db.Column(db.Float, nullable=True)
 

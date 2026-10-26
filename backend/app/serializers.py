@@ -100,8 +100,6 @@ def violation_to_dict(v: Violation) -> dict:
         "status": v.status,
         "image_status": v.image_status,
         "has_image": bool(v.image_key) and v.image_status == ImageStatus.UPLOADED,
-        "plate_number": v.plate_number,
-        "plate_confidence": v.plate_confidence,
         "resolved_at": iso(v.resolved_at),
         "resolved_by": v.resolved_by,
         "resolved_by_name": v.resolver.name if v.resolver else None,
