@@ -158,3 +158,7 @@ SQLite는 일부 구문을 무시하므로 DB 제약이나 잠금에 관련된 �
 flask --app wsgi db migrate -m "설명"
 flask --app wsgi db upgrade
 ```
+
+## 배포
+
+이미지는 GitHub Actions 가 빌드해 ECR 에 올리고, `Parking-guardian-config` 리포의 이미지 태그를 갱신한다. 클러스터 반영은 Argo CD 가 자동으로 한다(GitOps). 자세한 절차는 config 리포 README.
