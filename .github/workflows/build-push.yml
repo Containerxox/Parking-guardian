@@ -7,6 +7,9 @@
 #       이미 있는 태그면 빌드를 건너뛴다(같은 커밋을 재실행해도 실패하지 않는다).
 # Backend 빌드는 YOLOv5 소스를 두 번째 빌드 컨텍스트 "yolov5" 로 받는다(Dockerfile 머리말). 로컬에선 docker-compose 가
 #       ../yolov5 를 넘기고, 여기서는 ultralytics/yolov5 를 로컬과 같은 커밋으로 checkout 해서 넘긴다.
+# 2단계: 두 이미지가 ECR 에 있으면 config 리포(Parking-guardian-config)의 kustomization.yaml 에서 images: 의 newTag 두 줄을
+#       이 커밋 해시로 바꿔 커밋·푸시한다. 권한은 Fine-grained PAT(Secret CONFIG_REPO_TOKEN, config 리포 Contents 쓰기만).
+#       클러스터 적용(kubectl apply -k)은 Phase 1 에선 수동이다. 뒤 Phase 에 Argo CD 가 이 커밋을 보고 자동 적용한다.
 name: Build and push images
 
 on:
@@ -120,3 +123,64 @@ jobs:
             echo '```'
             if [ "${{ steps.exists.outputs.exists }}" = "true" ]; then echo "_already existed, build skipped_"; fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
+  # 2단계: config 리포의 이미지 태그 갱신. build 매트릭스(backend, frontend) 둘 다 성공해야 실행된다.
+  # 빌드가 "이미 있는 태그" 로 건너뛴 경우에도 실행된다(태그가 ECR 에 있는 것은 같으므로).
+  # ---------------------------------------------------------------------------------------------
+  update-config:
+    name: update config repo image tags
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      # 앱 리포가 아니라 config 리포를 받는다. GITHUB_TOKEN 은 다른 리포에 push 할 수 없으므로 PAT 를 쓴다.
+      # persist-credentials 기본값 true 라 뒤의 git push 가 같은 토큰을 쓴다.
+      - name: Checkout config repo
+        uses: actions/checkout@v4
+        with:
+          repository: Containerxox/Parking-guardian-config
+          token: ${{ secrets.CONFIG_REPO_TOKEN }}
+          path: config
+
+      # kustomize edit set image 는 파일을 다시 써서 주석이 사라진다. newTag 두 줄만 정규식으로 바꾼다.
+      # 패턴이 없으면(파일 구조가 바뀌었으면) 실패시켜서 조용히 넘어가지 않게 한다.
+      - name: Set image tags in kustomization.yaml
+        id: set
+        working-directory: config/apps/parking-guardian
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          python3 - "$TAG" <<'PY'
+          import re, sys, pathlib
+          tag = sys.argv[1]
+          path = pathlib.Path("kustomization.yaml")
+          text = path.read_text(encoding="utf-8")
+          for image in ("parking-guardian/backend", "parking-guardian/frontend"):
+              pattern = re.compile(r"(- name: " + re.escape(image) + r"\n\s+newTag: )\S+")
+              text, n = pattern.subn(r"\g<1>" + tag, text)
+              if n != 1:
+                  sys.exit(f"images: 에서 {image} 의 newTag 를 찾지 못했다 (matches={n})")
+          path.write_text(text, encoding="utf-8", newline="\n")
+          print(text[text.index("images:"):])
+          PY
+
+      # 같은 커밋을 재실행하면 바뀐 것이 없다. 그때는 커밋하지 않고 끝낸다.
+      - name: Commit and push
+        working-directory: config
+        env:
+          TAG: ${{ steps.set.outputs.tag }}
+          APP_COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          if git diff --quiet; then
+            echo "::notice::images: 태그가 이미 $TAG 이다. 커밋할 것이 없다."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apps/parking-guardian/kustomization.yaml
+          git commit -m "deploy: backend·frontend 이미지 태그 $TAG" -m "앱 커밋: $APP_COMMIT_URL" -m "by ${{ github.workflow }} run ${{ github.run_id }}"
+          # 다른 커밋이 먼저 들어갔으면 한 번 rebase 하고 다시 push 한다.
+          git push || (git pull --rebase && git push)
+          echo "### config repo" >> "$GITHUB_STEP_SUMMARY"
+          echo "images: newTag → \`$TAG\` ($(git rev-parse --short HEAD))" >> "$GITHUB_STEP_SUMMARY"
