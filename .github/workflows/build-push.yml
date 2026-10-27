@@ -1,0 +1,122 @@
+# 컨테이너 이미지 빌드 → ECR 푸시.
+#
+# 언제: develop / main 에 push 되고 backend/ 또는 frontend/ 가 바뀌었을 때. 수동 실행(workflow_dispatch)도 가능.
+# 인증: GitHub OIDC → AWS IAM 역할(infra 리포 data 스택 cicd.tf). 장기 Access Key 없음.
+#       역할 ARN 은 Repository variable AWS_ROLE_ARN. 역할의 신뢰 정책이 이 리포의 develop/main 브랜치만 허용한다.
+# 태그: 커밋 짧은 해시(7자). ECR 태그가 불변(IMMUTABLE)이라 같은 태그를 다시 푸시할 수 없으므로,
+#       이미 있는 태그면 빌드를 건너뛴다(같은 커밋을 재실행해도 실패하지 않는다).
+# Backend 빌드는 YOLOv5 소스를 두 번째 빌드 컨텍스트 "yolov5" 로 받는다(Dockerfile 머리말). 로컬에선 docker-compose 가
+#       ../yolov5 를 넘기고, 여기서는 ultralytics/yolov5 를 로컬과 같은 커밋으로 checkout 해서 넘긴다.
+name: Build and push images
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - ".github/workflows/build-push.yml"
+  workflow_dispatch:
+
+# OIDC 토큰 발급(id-token)과 소스 checkout(contents)만. 기본 권한은 모두 끈다.
+permissions:
+  id-token: write
+  contents: read
+
+# 같은 브랜치의 이전 실행이 돌고 있어도 취소하지 않는다(푸시 중간에 끊긴 레이어가 남지 않게).
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  # 로컬 capston/yolov5 폴더와 같은 커밋 (ultralytics/yolov5, 2026-10-01). 바꾸면 Backend 이미지가 바뀐다.
+  YOLOV5_COMMIT: 4add2aff6e3d926586a3eab4659f3b498dd444a1
+
+jobs:
+  build:
+    name: ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 하나가 실패해도 다른 쪽은 끝까지 간다
+      matrix:
+        component: [backend, frontend]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Backend 이미지는 2.9 GB. 러너의 기본 디스크(약 14 GB 여유)가 빌드 캐시까지 감당하도록 안 쓰는 SDK 를 지운다.
+      - name: Free disk space (backend only)
+        if: matrix.component == 'backend'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout YOLOv5 (backend only)
+        if: matrix.component == 'backend'
+        uses: actions/checkout@v4
+        with:
+          repository: ultralytics/yolov5
+          ref: ${{ env.YOLOV5_COMMIT }}
+          path: yolov5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: gha-${{ github.run_id }}-${{ matrix.component }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image name and tag
+        id: meta
+        run: |
+          echo "repository=parking-guardian/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ steps.ecr.outputs.registry }}/parking-guardian/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+          echo "tag=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      # 불변 태그: 이미 있으면 푸시가 거부되므로 먼저 확인하고 건너뛴다.
+      - name: Check whether the tag already exists
+        id: exists
+        run: |
+          if aws ecr describe-images --repository-name "${{ steps.meta.outputs.repository }}" \
+               --image-ids imageTag="${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }} already exists. Skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      # 노드는 x86_64(m7i) 이므로 linux/amd64 로 고정. Dockerfile 의 --mount=type=cache 는 BuildKit(buildx)이 필요하다.
+      # 레이어 캐시는 GitHub Actions 캐시(리포당 10 GB, 오래된 것부터 삭제). 캐시가 비어도 빌드는 된다(느릴 뿐).
+      - name: Build and push
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component }}
+          # Backend 만 두 번째 컨텍스트. frontend 에서는 빈 문자열이라 무시된다.
+          build-contexts: ${{ matrix.component == 'backend' && 'yolov5=./yolov5' || '' }}
+          platforms: linux/amd64
+          push: true
+          provenance: false # 단일 매니페스트로 푸시(provenance 를 켜면 인덱스 + untagged 조각이 생긴다)
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,scope=${{ matrix.component }},mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ matrix.component }}"
+            echo '```'
+            echo "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+            echo '```'
+            if [ "${{ steps.exists.outputs.exists }}" = "true" ]; then echo "_already existed, build skipped_"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
