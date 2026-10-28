@@ -18,9 +18,12 @@ log = logging.getLogger(__name__)
 # still lands in a bucket instead of only in +Inf.
 _HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120)
 
+# Label is "route", not "endpoint": Prometheus Operator stamps every scraped series with endpoint=<port name>
+# ("metrics"), and with honor_labels off the app's own endpoint label gets renamed to exported_endpoint. A name
+# that nobody else uses avoids the clash (found 2026-10-28: every dashboard query on endpoint came back empty).
 HTTP_REQUEST_DURATION = Histogram(
     "http_request_duration_seconds", "Request latency by route template, method and status.",
-    ["method", "endpoint", "status"], buckets=_HTTP_BUCKETS)
+    ["method", "route", "status"], buckets=_HTTP_BUCKETS)
 HTTP_REQUESTS_IN_FLIGHT = Gauge(
     "http_requests_in_flight", "Requests currently inside Flask (all 4 gunicorn threads busy = 4).")
 
@@ -65,8 +68,8 @@ def init_metrics(app) -> None:
             return
         HTTP_REQUESTS_IN_FLIGHT.dec()
         status = g.pop("_metrics_status", 500 if exc is not None else 0)
-        endpoint = request.url_rule.rule if request.url_rule is not None else "unmatched"
-        HTTP_REQUEST_DURATION.labels(request.method, endpoint, str(status)).observe(time.perf_counter() - started)
+        route = request.url_rule.rule if request.url_rule is not None else "unmatched"
+        HTTP_REQUEST_DURATION.labels(request.method, route, str(status)).observe(time.perf_counter() - started)
 
 
 def start_metrics_server(port: int) -> None:
