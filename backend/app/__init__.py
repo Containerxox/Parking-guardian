@@ -12,6 +12,7 @@ from .cli import register_cli
 from .config import Config
 from .errors import register_error_handlers
 from .extensions import db, migrate
+from .metrics import init_metrics
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -45,6 +46,7 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     register_error_handlers(app)
     register_blueprints(app)
+    init_metrics(app)
     init_adapters(app)
     register_cli(app)
     return app

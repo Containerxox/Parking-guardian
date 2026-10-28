@@ -93,6 +93,9 @@ class Config:
     WINDOW_CONF = float(os.environ.get("WINDOW_CONF", "0.25"))
     STICKER_CONF = float(os.environ.get("STICKER_CONF", "0.5"))
     INFERENCE_IMAGE_SIZE = int(os.environ.get("INFERENCE_IMAGE_SIZE", "640"))
+
+    # Prometheus /metrics port (own HTTP server thread, started by gunicorn.conf.py). 0 disables it.
+    METRICS_PORT = int(os.environ.get("METRICS_PORT", "9102"))
     # Licence plate OCR settings (OCR_*) were removed with the OCR step (ADR 0017).
 
     # --- Devices ---

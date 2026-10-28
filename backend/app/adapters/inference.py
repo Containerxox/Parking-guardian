@@ -11,6 +11,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .. import metrics
+
 log = logging.getLogger(__name__)
 
 NO_VEHICLE = "no_vehicle"
@@ -111,6 +113,10 @@ class YoloInference:
         # ready: both models loaded. failed: the last load attempt raised; the next photo retries.
         self.state = "cold"
 
+    def _set_state(self, state: str) -> None:
+        self.state = state
+        metrics.MODEL_STATE.state(state)
+
     def warm_up(self) -> None:
         """Load the models in a background thread (called once per gunicorn worker, see gunicorn.conf.py).
 
@@ -120,7 +126,7 @@ class YoloInference:
         """
         if self.state != "cold":
             return
-        self.state = "loading"
+        self._set_state("loading")
 
         def run():
             try:
@@ -160,14 +166,16 @@ class YoloInference:
                         f"window model has none of the classes {sorted(self.window_class_names)}: {window_model.names}")
                 self._sticker_model = sticker_model
                 self._window_model = window_model
-                self.state = "ready"
-                log.info("YOLOv5 models loaded in %.1fs", time.time() - started)
+                elapsed = time.time() - started
+                metrics.MODEL_LOAD_SECONDS.set(elapsed)
+                self._set_state("ready")
+                log.info("YOLOv5 models loaded in %.1fs", elapsed)
             except InferenceError:
-                self.state = "failed"
+                self._set_state("failed")
                 log.exception("model load failed")
                 raise
             except Exception as exc:  # missing torch, missing files, incompatible checkpoint ...
-                self.state = "failed"
+                self._set_state("failed")
                 log.exception("model load failed")
                 raise InferenceError(f"model load failed: {exc}") from exc
 
@@ -187,19 +195,39 @@ class YoloInference:
         ]
 
     def analyze(self, image_bytes: bytes, filename: str = "") -> InferenceResult:
+        """Decode, then run the two models under the lock. Records lock wait, stage times and the outcome."""
+        metrics.INFERENCE_IN_FLIGHT.inc()
+        try:
+            result = self._analyze(image_bytes)
+        except InvalidImageError:
+            metrics.INFERENCE_REQUESTS.labels("", "invalid_image").inc()
+            raise
+        except InferenceError:
+            metrics.INFERENCE_REQUESTS.labels("", "error").inc()
+            raise
+        finally:
+            metrics.INFERENCE_IN_FLIGHT.dec()
+        metrics.INFERENCE_REQUESTS.labels(result.verdict, "ok").inc()
+        return result
+
+    def _analyze(self, image_bytes: bytes) -> InferenceResult:
         import cv2
         import numpy as np
 
-        image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        with metrics.INFERENCE_STAGE.labels("decode").time():
+            image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise InvalidImageError("cannot decode image")
 
         self._ensure_loaded()
         started = time.time()
         try:
+            queued = time.perf_counter()
             with self._lock:  # the hub models are not safe for concurrent calls
-                windows = [d for d in self._detect(self._window_model, image, self.image_size)
-                           if d["name"] in self.window_class_names]
+                metrics.INFERENCE_LOCK_WAIT.observe(time.perf_counter() - queued)
+                with metrics.INFERENCE_STAGE.labels("window").time():
+                    windows = [d for d in self._detect(self._window_model, image, self.image_size)
+                               if d["name"] in self.window_class_names]
                 if not windows:
                     return InferenceResult(has_window=False, backend=self.name,
                                            elapsed_ms=int((time.time() - started) * 1000))
@@ -213,7 +241,9 @@ class YoloInference:
                 crop = image[max(0, y1):y2, max(0, x1):x2]
                 stickers = []
                 if crop.size:
-                    for det in self._detect(self._sticker_model, crop, self.image_size):
+                    with metrics.INFERENCE_STAGE.labels("sticker").time():
+                        detections = self._detect(self._sticker_model, crop, self.image_size)
+                    for det in detections:
                         sx1, sy1, sx2, sy2 = det["coords"]
                         # crop-relative -> absolute coordinates in the original image
                         stickers.append({"coords": [x1 + sx1, y1 + sy1, x1 + sx2, y1 + sy2],
