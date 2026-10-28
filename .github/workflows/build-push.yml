@@ -157,8 +157,10 @@ jobs:
           path = pathlib.Path("kustomization.yaml")
           text = path.read_text(encoding="utf-8")
           for image in ("parking-guardian/backend", "parking-guardian/frontend"):
+              # newTag 는 반드시 따옴표로 쓴다. 숫자만으로 된 해시(예: 3993669)를 그대로 두면 YAML 이 정수로 읽어
+              # kustomize build 가 "cannot unmarshal number into ... newTag of type string" 으로 실패한다(2026-10-28 실제 발생).
               pattern = re.compile(r"(- name: " + re.escape(image) + r"\n\s+newTag: )\S+")
-              text, n = pattern.subn(r"\g<1>" + tag, text)
+              text, n = pattern.subn(r"\g<1>" + '"' + tag + '"', text)
               if n != 1:
                   sys.exit(f"images: 에서 {image} 의 newTag 를 찾지 못했다 (matches={n})")
           path.write_text(text, encoding="utf-8", newline="\n")
