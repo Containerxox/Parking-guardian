@@ -55,9 +55,13 @@ class MockInference:
     """Decides from the file name: contains 'permitted' or 'novehicle', otherwise the default verdict."""
 
     name = "mock"
+    state = "ready"  # nothing to load
 
     def __init__(self, default_verdict: str = VIOLATION):
         self.default_verdict = default_verdict
+
+    def warm_up(self) -> None:
+        """No model to load."""
 
     def analyze(self, image_bytes: bytes, filename: str = "") -> InferenceResult:
         if not image_bytes:
@@ -102,6 +106,29 @@ class YoloInference:
         self._lock = threading.Lock()
         self._window_model = None
         self._sticker_model = None
+        # cold: not loaded, will load on the first photo (local runs, CLI).
+        # loading: warm_up() is loading in the background; /readyz answers 503 so no traffic arrives yet.
+        # ready: both models loaded. failed: the last load attempt raised; the next photo retries.
+        self.state = "cold"
+
+    def warm_up(self) -> None:
+        """Load the models in a background thread (called once per gunicorn worker, see gunicorn.conf.py).
+
+        Without this a freshly scaled-out Pod is Ready while its first photo still pays the 25-35 s
+        model load. With it, /readyz stays 503 until the models are in memory, so the ALB and the
+        HPA only see the Pod once it can actually answer in ~1 s.
+        """
+        if self.state != "cold":
+            return
+        self.state = "loading"
+
+        def run():
+            try:
+                self._ensure_loaded()
+            except Exception:  # already logged and recorded as state="failed"; the API keeps serving
+                pass
+
+        threading.Thread(target=run, name="inference-warm-up", daemon=True).start()
 
     # Models are loaded on first use so the API server starts quickly and works without torch
     # until a device actually uploads an image.
@@ -133,10 +160,15 @@ class YoloInference:
                         f"window model has none of the classes {sorted(self.window_class_names)}: {window_model.names}")
                 self._sticker_model = sticker_model
                 self._window_model = window_model
+                self.state = "ready"
                 log.info("YOLOv5 models loaded in %.1fs", time.time() - started)
             except InferenceError:
+                self.state = "failed"
+                log.exception("model load failed")
                 raise
             except Exception as exc:  # missing torch, missing files, incompatible checkpoint ...
+                self.state = "failed"
+                log.exception("model load failed")
                 raise InferenceError(f"model load failed: {exc}") from exc
 
     @staticmethod

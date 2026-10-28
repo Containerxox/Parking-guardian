@@ -72,8 +72,8 @@ docker compose down              # 정지. 데이터까지 지우려면 down -v
 | http://127.0.0.1:5000 | Backend API 직접 접근. `scripts\send_detection.py` 가 기본으로 쓰는 주소 |
 
 - 준비물: `backend\models\default.pt`, `backend\models\last.pt`, 저장소 루트의 `yolov5\` 폴더. 모델 없이 띄우려면 `$env:INFERENCE_BACKEND = "mock"` 을 주고 실행한다.
-- 시작할 때 DB 마이그레이션과 데모 데이터 입력이 자동으로 된다.
-- 컨테이너를 띄운 뒤 첫 사진은 모델을 읽느라 약 30초 걸린다. 그다음부터는 약 1초다.
+- 시작할 때 DB 마이그레이션과 데모 데이터 입력이 자동으로 된다(`MIGRATE_ON_START=0` 이면 건너뛴다. Kubernetes 에서는 배포 전 Job 이 한 번만 실행한다).
+- 컨테이너가 뜨면 바로 모델을 읽기 시작한다(`gunicorn.conf.py` 의 워커 훅). 읽는 약 30초 동안 `/readyz` 는 503 이고, 그 뒤 사진 1장은 약 1초다.
 - `python wsgi.py` 와 같은 5000번 포트를 쓴다. 둘을 같이 띄우려면 `$env:BACKEND_PORT = "5050"` 처럼 포트를 바꾼다. 화면 포트는 `FRONTEND_PORT`.
 - 위반 사진은 `backend_storage` volume에 저장된다.
 

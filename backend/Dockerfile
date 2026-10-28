@@ -49,14 +49,11 @@ ENV FLASK_APP=wsgi \
 
 EXPOSE 5000
 
-# 1. Apply database migrations. 2. Optionally create demo data. 3. Start gunicorn.
-# `exec` makes gunicorn PID 1 so it receives SIGTERM and shuts down gracefully.
-# One worker: each worker would load its own copy of the models (the sticker model is 370 MB).
-CMD flask db upgrade \
-    && if [ "$SEED_DEMO_DATA" = "1" ]; then flask seed; fi \
-    && exec gunicorn wsgi:app \
-        --bind 0.0.0.0:5000 \
-        --workers "${WEB_CONCURRENCY:-1}" \
-        --threads "${GUNICORN_THREADS:-4}" \
-        --timeout "${GUNICORN_TIMEOUT:-120}" \
-        --access-logfile -
+# 1. Apply database migrations and optionally create demo data -- unless MIGRATE_ON_START=0.
+#    On Kubernetes a pre-sync Job runs these once per deploy, because two replicas (HPA) running
+#    `flask db upgrade` at the same time would race on the alembic_version table. docker-compose keeps
+#    the default (1): one container, migrate on start.
+# 2. Start gunicorn. `exec` makes gunicorn PID 1 so it receives SIGTERM and shuts down gracefully.
+#    One worker: each worker would load its own copy of the models (the sticker model is 370 MB).
+#    gunicorn.conf.py starts loading the models right after the worker is up (warm-up for /readyz).
+CMD if [ "${MIGRATE_ON_START:-1}" = "1" ]; then         flask db upgrade         && if [ "$SEED_DEMO_DATA" = "1" ]; then flask seed; fi;     fi     && exec gunicorn -c gunicorn.conf.py wsgi:app         --bind 0.0.0.0:5000         --workers "${WEB_CONCURRENCY:-1}"         --threads "${GUNICORN_THREADS:-4}"         --timeout "${GUNICORN_TIMEOUT:-120}"         --access-logfile -
