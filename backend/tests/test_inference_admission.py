@@ -4,7 +4,8 @@ Two different numbers, kept apart:
   running  = photos inside the model right now. Fixed at 1: the model lock stays (not proven thread safe).
   waiting  = photos queued behind it, at most INFERENCE_MAX_WAITING (default 2).
 A photo that would be the (max_waiting + 1)-th waiter is refused at once: 503 {"error": "busy"} + Retry-After: 1.
-Everything runs on real threads against the Flask test client, so the limit is shown to hold, not assumed.
+The limit is per process (see inference_service/admission.py): a second gate shares nothing with the first,
+which is why the service must run a single gunicorn worker. Everything runs on real threads against the Flask test client, so the limit is shown to hold, not assumed.
 """
 import threading
 import time
@@ -14,6 +15,7 @@ from prometheus_client import REGISTRY
 
 from app.adapters.inference import InferenceError, InferenceResult, InvalidImageError
 from inference_service import create_app
+from inference_service.admission import AdmissionGate, Busy
 
 JPEG = b"\xff\xd8\xff\xe0" + b"fake-jpeg-content"
 
@@ -192,3 +194,14 @@ def test_fault_delay_is_off_by_default():
     service = create_app({"TESTING": True, "INFERENCE_BACKEND": "mock"})
 
     assert service.config["INFERENCE_FAULT_DELAY_MS"] == 0
+
+
+def test_the_limit_is_per_process_not_shared_between_gates():
+    """Documents why the service needs exactly one worker: every worker would build its own gate."""
+    first, second = AdmissionGate(max_waiting=0), AdmissionGate(max_waiting=0)
+    with first.slot():
+        with second.slot():  # a shared limit would have refused this
+            assert (first.running, second.running) == (1, 1)
+        with pytest.raises(Busy):
+            with first.slot():
+                pass

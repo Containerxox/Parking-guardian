@@ -14,6 +14,7 @@ with InferenceResult.from_dict.
 """
 import logging
 import time
+from urllib.parse import unquote
 
 from flask import Flask, jsonify, request
 
@@ -50,7 +51,7 @@ def create_app(test_config: dict | None = None, inference=None) -> Flask:
     def analyze():
         image_bytes = request.get_data()
         request_id = request.headers.get("X-Request-Id", "")
-        filename = request.headers.get("X-Filename", "")
+        filename = unquote(request.headers.get("X-Filename", ""))  # sent percent-encoded (ASCII headers)
         response, status = _analyze(model(), gate, fault_delay, image_bytes, filename, request_id)
         reply = jsonify(response)
         reply.status_code = status

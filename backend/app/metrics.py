@@ -48,6 +48,19 @@ INFERENCE_WAITING = Gauge(
     "pg_inference_waiting", "Photos queued behind the running one (inference service; at most INFERENCE_MAX_WAITING).")
 INFERENCE_REJECTED = Counter(
     "pg_inference_rejected_total", "Photos refused with 503 busy because running and waiting were both full.")
+# --- AI client (API side, HttpInference) -----------------------------------
+AI_CLIENT_REQUESTS = Counter(
+    "pg_ai_client_requests_total",
+    "analyze() calls to the inference service by final outcome (ok, invalid_image, busy, unavailable, timeout, "
+    "connect_error, connection_lost, bad_response, bulkhead_full).", ["outcome"])
+AI_CLIENT_DURATION = Histogram(
+    "pg_ai_client_duration_seconds", "Whole analyze() call as the API sees it, retries and waits included.",
+    buckets=_INFERENCE_BUCKETS)
+AI_CLIENT_RETRIES = Counter(
+    "pg_ai_client_retries_total", "Extra attempts after a first failure, by reason (busy, connect_error).",
+    ["reason"])
+AI_CLIENT_IN_FLIGHT = Gauge(
+    "pg_ai_client_in_flight", "Calls to the inference service in progress (the bulkhead counts these).")
 MODEL_LOAD_SECONDS = Gauge("pg_model_load_seconds", "Wall time of the last successful model load.")
 MODEL_STATE = Enum("pg_inference_model_state", "Model state of this process.",
                    states=["cold", "loading", "ready", "failed"])

@@ -5,6 +5,10 @@
 
 One more photo than running + waiting is refused immediately (Busy) instead of queueing without bound. The API
 side turns that into a quick 503 / one retry, so a burst costs the caller milliseconds, not a full deadline.
+The limit lives in this process's memory only. Two gunicorn workers would each get their own gate (and
+their own copy of the model), doubling both the admitted photos and the memory; so the inference service runs
+ONE worker and gets more capacity from more Pods (total admitted = Pods x (1 + max_waiting)). The entry point
+must keep workers = 1 (design doc 3.5, step 2-6).
 The two counters are separate on purpose (and separate gauges in app/metrics.py): "running" saturates at 1
 under any load, "waiting" is the one that shows how deep the line is.
 """

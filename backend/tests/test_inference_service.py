@@ -89,6 +89,15 @@ def test_filename_header_is_optional():
     assert stub.calls == [(JPEG, "")]
 
 
+def test_percent_encoded_filename_is_decoded():
+    """HTTP headers are ASCII, so the client percent-encodes the file name (HttpInference)."""
+    from urllib.parse import quote
+    stub = StubInference()
+    analyze(make_client(stub), filename=quote("한글 사진.jpg", safe=""))
+
+    assert stub.calls == [(JPEG, "한글 사진.jpg")]
+
+
 def test_request_id_is_echoed(client):
     assert analyze(client, **{"X-Request-Id": "req-123"}).headers["X-Request-Id"] == "req-123"
 

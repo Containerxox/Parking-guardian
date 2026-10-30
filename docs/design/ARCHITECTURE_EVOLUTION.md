@@ -179,6 +179,11 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 | 대기 상한 `INFERENCE_MAX_WAITING` | 2 | **T1 (4.2) 로 조정** |
 | torch 스레드 `TORCH_NUM_THREADS` | 1 (지금 Pod 안 값 [확인]) | E1 |
 | readiness | 모델 ready 일 때만 200. busy 는 반영 안 함 | 부하로 NotReady 가 되면 남은 Pod 로 몰려 연쇄 장애 |
+| 모델 로딩 실패 | 백그라운드 최대 3회(`MODEL_LOAD_ATTEMPTS`) 시도 뒤 `/healthz` 503 → livenessProbe 로 컨테이너 재시작 | 단계 5-4 에서 inference Deployment 의 livenessProbe 가 `/healthz` 를 보는지 확인 |
+
+**대기 상한은 프로세스 안의 제한이다.** `AdmissionGate`(`inference_service/admission.py`)는 한 프로세스의 메모리 안에서만 센다. gunicorn worker 가 2개면 worker 마다 모델 1개 + 대기 2개씩 따로 허용되어 상한이 2배가 되고, 모델 메모리도 2배가 된다. 그래서 AI 서비스는 **worker 1개** 전제다(3.5 첫 행). 2-6 에서 gunicorn 설정이 `workers=1` 을 강제하는지 확인하고, Pod 를 늘려 얻는 전체 상한은 "Pod 수 × (1 + 대기 상한)" 이다.
+
+**게이트가 디코드까지 직렬화한다.** `AdmissionGate` 는 `analyze()` 전체를 감싸므로 이미지 디코드(`cv2.imdecode`)도 한 번에 하나씩 실행된다. Prototype 은 디코드가 락 밖이라 병렬이었다. 측정 없이 최적화하지 않고, E1 에서 함께 비교한다(4.1).
 
 ### 3.6 API 서버 동시성 [제안]
 
@@ -373,7 +378,7 @@ inference 단독, k6 closed-loop.
 | 번호 | 바꾸는 것 | 측정 | 비고 |
 |---|---|---|---|
 | E0 | 없음 (Pod 1, worker 1, torch 1, 동시 1) | 장당 서비스 시간 분포, 최대 처리량 C₁ | 이후 모든 값의 근거 |
-| E1 | torch 스레드 1 → 2 | 처리량, p95, CPU | 남는 CPU 가 적어 이득이 없을 수 있다 [추정]. 단정하지 않음 |
+| E1 | torch 스레드 1 → 2 | 처리량, p95, CPU | 남는 CPU 가 적어 이득이 없을 수 있다 [추정]. 단정하지 않음. **함께 기록:** 게이트가 디코드까지 직렬화한 영향(3.5). `pg_inference_stage_seconds{stage="decode"}` 가 장당 시간에서 차지하는 비중과, 디코드가 락 밖이던 Prototype 과의 처리량 차이. 비중이 작으면 그대로 두고, 크면 그때 디코드를 게이트 밖으로 뺄지 판단한다 |
 | E2 | 같은 노드에 inference Pod 2개(요청 각 600m) = "프로세스 2개" | 노드당 처리량, 지연, 메모리 | 코드 변경 없이 프로세스 수 효과를 본다 |
 | E3 | Pod 1 → 2 → 3 (노드마다 1개) | 서비스 전체 처리량 C | 선형 확장 여부. **C 가 S 시나리오 부하 단계의 기준** |
 
@@ -925,7 +930,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 2-3 | 대기 상한(`INFERENCE_MAX_WAITING`) → 503 busy + `Retry-After`, `pg_inference_rejected_total`, 테스트 전용 지연 주입 | 동시 요청 테스트에서 상한 초과분 즉시 거절 |
 | 2-4 | `HttpInference`: 연결 타임아웃, 전체 마감, busy·연결 실패 1회 재시도, 동시 상한, 예외 매핑, AI 클라이언트 메트릭 4개 | 2-2 의 test client 를 대상으로 한 계약·실패 테스트 통과 |
 | 2-5 | 설정 키, `build_inference` 의 `http` 분기, readyz `remote` | `device.py` 무변경으로 기존 장비 테스트 통과 |
-| 2-6 | 진입점: `wsgi_inference.py`, `gunicorn_inference.conf.py`(웜업·메트릭 서버), `gunicorn.conf.py` 는 로컬 추론일 때만 웜업, `TORCH_NUM_THREADS`. graceful timeout 명시 여부 결정 | 로컬에서 두 프로세스로 실제 모델 판정 1장 |
+| 2-6 | 진입점: `wsgi_inference.py`, `gunicorn_inference.conf.py`(웜업·메트릭 서버), `gunicorn.conf.py` 는 로컬 추론일 때만 웜업, `TORCH_NUM_THREADS`. graceful timeout 명시 여부 결정. **AI 서비스 worker 1개 전제(3.5) 강제 확인** — `AdmissionGate` 는 프로세스 안 제한이므로 worker 2개 이상이면 상한이 깨진다 | 로컬에서 두 프로세스로 실제 모델 판정 1장 |
 | 2-7 | 전체 pytest (SQLite, 그리고 `docker compose up -d db` 뒤 PostgreSQL) | 전부 통과 |
 
 **3. 로컬 Docker Compose 통합**
@@ -954,7 +959,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 5-1 | 읽기 전용 확인: RDS `max_connections`, CloudWatch add-on 최신 기본 버전 | 9.5 확인 필요 항목 정리 |
 | 5-2 | infra 변경 작성 + `plan -out`: ECR `inference`(data), inference 역할·Pod Identity·backend 권한 축소(cluster) | plan 결과 보고 |
 | 5-3 | CloudWatch add-on 결정 요청(3.12 의 O0~O4) | 사용자 결정 |
-| 5-4 | config 매니페스트 작성, `kubectl kustomize` 로 렌더링 확인 | 렌더링 통과 |
+| 5-4 | config 매니페스트 작성, `kubectl kustomize` 로 렌더링 확인. **inference livenessProbe 가 `/healthz` 를 보는지, 모델 로딩 포기(3회 실패) 시 컨테이너가 재시작되는 경로가 맞는지 검증** (3.5) | 렌더링 통과 |
 | 5-5 | CI 변경 작성(ECR 생성 뒤 push 하는 순서) | 검토 |
 
 **6. EKS 배포와 성능 측정** 🔒
