@@ -93,6 +93,10 @@ class Config:
     WINDOW_CONF = float(os.environ.get("WINDOW_CONF", "0.25"))
     STICKER_CONF = float(os.environ.get("STICKER_CONF", "0.5"))
     INFERENCE_IMAGE_SIZE = int(os.environ.get("INFERENCE_IMAGE_SIZE", "640"))
+    # Background model load: total attempts and the base wait between them (waits grow: delay x attempt).
+    # After the last failure the inference service reports /healthz 503 so Kubernetes restarts the container.
+    MODEL_LOAD_ATTEMPTS = int(os.environ.get("MODEL_LOAD_ATTEMPTS", "3"))
+    MODEL_LOAD_RETRY_SECONDS = float(os.environ.get("MODEL_LOAD_RETRY_SECONDS", "5"))
 
     # Prometheus /metrics port (own HTTP server thread, started by gunicorn.conf.py). 0 disables it.
     METRICS_PORT = int(os.environ.get("METRICS_PORT", "9102"))

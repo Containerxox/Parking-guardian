@@ -123,7 +123,7 @@ class YoloInference:
     name = "yolo"
 
     def __init__(self, yolov5_dir, window_model_path, sticker_model_path, window_class_name="car_window",
-                 window_conf=0.25, sticker_conf=0.25, image_size=640):
+                 window_conf=0.25, sticker_conf=0.25, image_size=640, load_attempts=3, retry_delay=5.0):
         self.yolov5_dir = str(yolov5_dir)
         self.window_model_path = str(window_model_path)
         self.sticker_model_path = str(sticker_model_path)
@@ -133,6 +133,11 @@ class YoloInference:
         self.window_conf = window_conf
         self.sticker_conf = sticker_conf
         self.image_size = image_size
+        # warm_up() tries to load this many times, waiting retry_delay * attempt seconds in between. After the
+        # last failure `gave_up` is True and nothing retries in the background any more.
+        self.load_attempts = max(1, int(load_attempts))
+        self.retry_delay = retry_delay
+        self.gave_up = False
         self._lock = threading.Lock()
         self._window_model = None
         self._sticker_model = None
@@ -157,10 +162,17 @@ class YoloInference:
         self._set_state("loading")
 
         def run():
-            try:
-                self._ensure_loaded()
-            except Exception:  # already logged and recorded as state="failed"; the API keeps serving
-                pass
+            for attempt in range(1, self.load_attempts + 1):
+                try:
+                    self._ensure_loaded()
+                    return
+                except Exception:  # already logged and recorded as state="failed"; the API keeps serving
+                    if attempt == self.load_attempts:
+                        break
+                    time.sleep(self.retry_delay * attempt)
+                    self._set_state("loading")
+            self.gave_up = True
+            log.error("model load failed %d times, giving up", self.load_attempts)
 
         threading.Thread(target=run, name="inference-warm-up", daemon=True).start()
 
@@ -300,4 +312,6 @@ def build_inference(config) -> object:
         window_conf=config["WINDOW_CONF"],
         sticker_conf=config["STICKER_CONF"],
         image_size=config["INFERENCE_IMAGE_SIZE"],
+        load_attempts=config.get("MODEL_LOAD_ATTEMPTS", 3),
+        retry_delay=config.get("MODEL_LOAD_RETRY_SECONDS", 5.0),
     )

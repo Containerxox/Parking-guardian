@@ -3,19 +3,24 @@ import logging
 from pathlib import Path
 
 from flask import Flask
-from flask_cors import CORS
-from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .adapters import init_adapters
-from .api import register_blueprints
-from .cli import register_cli
 from .config import Config
-from .errors import register_error_handlers
-from .extensions import db, migrate
-from .metrics import init_metrics
 
 
 def create_app(test_config: dict | None = None) -> Flask:
+    # Imported here, not at the top: `inference_service` imports app.adapters.inference, which runs this
+    # package's __init__. Keeping the database/auth/CORS packages out of module scope lets that service
+    # start without them (tests/test_inference_service_isolation.py).
+    from flask_cors import CORS
+    from werkzeug.middleware.proxy_fix import ProxyFix
+
+    from .adapters import init_adapters
+    from .api import register_blueprints
+    from .cli import register_cli
+    from .errors import register_error_handlers
+    from .extensions import db, migrate
+    from .metrics import init_metrics
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     app = Flask(__name__)
