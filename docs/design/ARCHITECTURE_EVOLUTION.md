@@ -296,13 +296,15 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 | | api | inference |
 |---|---|---|
 | 지표 | CPU 70% (요청 기준. 요청값은 S0 실측 뒤 확정) | CPU 70% (1,000m 기준. E0 실측 뒤 확인) |
-| min / max | 2 / 4 [초기값] | 2 / 3 [초기값] |
+| min / max | 2 / 3 [초기값] | 2 / 3 [초기값] |
+
+> api·inference 모두 **최대 3 은 3노드 실험 환경의 시작 기준이고 운영 환경의 최종 확장 한도가 아니다**(사용자 결정, 2026-10-30). 실제 노드 자원과 Pod 배치(V1)를 확인해 확정한다. 처음에는 api 4 로 적었으나 api 4 + inference 3 은 CPU 요청상 들어가지 않는다.
 | scaleDown 안정화 | 120초 [추정] | 300초 |
 | PDB | minAvailable 1 | minAvailable 1 |
 | 분산 | preferred (api 끼리) | preferred (inference 끼리) + zone spread |
 
 - max 는 노드 수가 아니라 **노드별 CPU 요청 여유**로 계산한다. CloudWatch add-on 현행 기준 3대의 여유 합은 약 3,690m 다(1,280 + 1,280 + 1,130).
-- inference 3 + api 2 는 들어간다. inference 가 3일 때 api 3번째부터는 들어갈 노드가 없다(N1·N2 여유 약 80m, N3 약 130m). 이때 Pending 은 숨기지 않고 S4 의 결과로 기록한다. S4 는 "inference 최대 3 + api 최대 2" 와 "api 최대 4 + inference 최대 2" 두 프로필로 나눠 측정한다.
+- **api 3 + inference 3 은 들어가지만 여유가 30m 뿐이다.** 노드마다 inference 1 + api 1 이면 1,200m / 1,280m 라 노드마다 80m 가 남고, 노드에 묶이지 않는 Pod(frontend 50m 와 확인 못 한 컨트롤러 요청)의 CPU 합이 **80m 를 넘으면 들어가지 않는다**(`check-placement.py` 민감도 표). 이전 서술(N3 여유 약 130m → "inference 3일 때 api 3번째부터 들어갈 노드가 없다")은 노드에 묶이지 않는 Pod 를 약 150m 로 잡은 가정이었고, 지금 계산은 50m 로 잡았다. **어느 쪽이 맞는지는 재구축 직후 노드별 요청 합으로 확인한다.** 이 최대 상태에서 롤링 업데이트를 하면 surge Pod 가 들어갈 자리가 없어 `maxUnavailable 0` 이라 서비스는 유지되고 롤링이 부하가 줄어 HPA 가 내려갈 때까지 기다린다(중단이 아니라 지연). Pending 은 숨기지 않고 S4 의 결과로 기록한다.
 - 요청값을 실측으로 다시 정하면 이 계산을 다시 한다. CloudWatch add-on 결정(3.12)에 따라서도 바뀐다.
 
 ### 3.10 계측 [제안]
@@ -340,6 +342,7 @@ api 추가: `pg_ai_client_request_seconds{outcome}`(ok, timeout, connect_error, 
 | dcgmExporter, neuronMonitor | GPU·Neuron 노드에만 | — | 예 (해당 노드 없음) | GPU·Inferentia 지표 |
 
 - 10-27 의 `amazon-cloudwatch` 네임스페이스 요청 합 700m(노드 2대)는 에이전트·Fluent Bit·매니저만으로 계산한 값과 정확히 맞는다. 10-28 `kubectl top` 에도 이 셋만 보였다. 그때 설치된 버전에는 nodeExporter·kubeStateMetrics 가 없었거나 꺼져 있었던 것으로 보인다 [추정].
+- **정정 (2026-10-30 읽기 전용 스키마 비교, 5단계)**: v6.7.0 과 v7.0.0 의 설정 스키마를 비교하니 두 구성 요소(`nodeExporter`, `kubeStateMetrics`)의 `enabled` 기본값은 **두 버전 모두** true 로 적혀 있고, 차이는 Knative/KServe/vLLM 스크랩 옵션 추가뿐이다. 즉 "v7 부터 켜진다" 는 아래 서술의 근거는 스키마에 없다. 반면 10-27/28 의 v6.7.0 클러스터에서는 두 구성 요소가 실제로 뜨지 않았다. 스키마 기본값과 실제 배포 동작이 다를 수 있어(이유 미확인) **버전과 무관하게 명시적으로 끄고, 측정된 v6.7.0 으로 고정**했다(`addons.tf`, P1). 선택지와 근거는 `phase1/aws-review/aws-review.md` 6절.
 - **재구축 위험**: 버전을 고정하지 않았으므로 다음 재구축 때 v7.0.0 이 설치될 수 있다. 그러면 노드마다 256m(nodeExporter)와 클러스터에 256m(kubeStateMetrics)가 더 예약될 수 있다. 3노드 배치(3.9)가 깨진다. kube-prometheus-stack 의 node-exporter·kube-state-metrics 와 **중복**이고, 둘 다 노드의 9100 포트를 쓰면 충돌할 수 있다 [확인 필요]. **재구축 직후 `kubectl -n amazon-cloudwatch get ds,deploy` 로 반드시 확인한다.** 이 확인은 AWS 변경이 아니다.
 - 리소스 조정 가능 여부: 스키마에 `agents[].resources`, `containerLogs.fluentBit.resources`, `manager.resources`, `nodeExporter.enabled/resources`, `kubeStateMetrics.enabled/resources`, `containerInsights.enabled`, `containerLogs.enabled` 가 있다 [확인]. 즉 **요청값 조정과 구성 요소별 끄기가 add-on 설정만으로 가능하다.** `containerInsights.enabled=false` 일 때 에이전트 DaemonSet 이 사라지는지는 확인하지 못했다 [확인 필요].
 
@@ -449,7 +452,7 @@ T1~T3 결과로 정한 값이 **Phase 1 공식 구성**이 되고, 그 값으로
 
 ### 5.3 지표
 
-Phase 1: 일반 API p50/p95/p99·오류율, AI 호출 시간·outcome·타임아웃, API 스레드 점유율, AI 처리량(Pod 별·전체), 락 대기, 거절 수, 전파 정도(S5 동안 일반 API 대 S0), api·inference CPU·메모리, HPA 트리거 → Ready → 첫 성공 추론, **사진 성공률**.
+Phase 1: 일반 API p50/p95/p99·오류율, AI 호출 시간·outcome·타임아웃, **AI 응답 대기 중 API 의 DB 연결 점유**(`pg_stat_activity` 의 idle in transaction 수와 AI 호출 시간의 관계. `require_device` 가 연 트랜잭션이 AI 호출 동안 열려 있다 — 코드로만 확인, 미측정), API 스레드 점유율, AI 처리량(Pod 별·전체), 락 대기, 거절 수, 전파 정도(S5 동안 일반 API 대 S0), api·inference CPU·메모리, HPA 트리거 → Ready → 첫 성공 추론, **사진 성공률**.
 
 Phase 2 추가: 접수 응답 시간, SQS 대기 수·가장 오래된 메시지 나이, Worker 처리량, End-to-End 지연(접수 → 판정 DB 반영, DB 타임스탬프), 재처리·복구 시간, DLQ·dead_lettered 수, 중복 위반·알림·판정 수(목표 0), stale 처리 수, 아웃박스 적체(`pending_publish` 수·나이), KEDA 반응, 추가 비용.
 
@@ -849,7 +852,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 파일 | 변경 |
 |---|---|
 | `apps/parking-guardian/backend-deployment.yaml` | initContainer·모델 볼륨 제거, 요청 200m/256Mi(S0 뒤 재조정), threads 8, required anti-affinity → **preferred(api 끼리)** 1개 + zone spread |
-| `backend-hpa.yaml`, `backend-pdb.yaml` | min 2 / max 4, 안정화 120초, PDB minAvailable 1 |
+| `backend-hpa.yaml`, `backend-pdb.yaml` | min 2 / max 3 (실험 시작 기준), 안정화 120초, PDB minAvailable 1 |
 | `inference-deployment.yaml`, `inference-service.yaml`, `inference-hpa.yaml`(min 2 / max 3), `inference-pdb.yaml`(minAvailable 1), `inference-podmonitor.yaml`, `serviceaccount-inference.yaml` (신규) | AI 서비스 한 벌. **preferred** anti-affinity + zone spread, Secret 마운트 없음 |
 | `serviceaccount-backend.yaml` | 주석(모델 권한 제거) |
 | `kustomization.yaml` | resources, images 3개, `ECR_INFERENCE` replacements, `inference-config` 생성기, `INFERENCE_BACKEND=http`, `INFERENCE_URL` |
@@ -886,7 +889,8 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 상황 | 배치 | 비고 |
 |---|---|---|
 | S4 프로필 1: inference 최대 3 + api 최대 2 | inference 3번째 → N3 (약 1,800m) | 들어간다 |
-| S4 프로필 2: api 최대 4 + inference 최대 2 | api 3·4번째 → N3 (약 1,200m) | 들어간다 |
+| S4 프로필 2: api 최대 3 + inference 최대 2 | api 3번째 → N3 (약 400m) | 들어간다 |
+| S4 프로필 3: 둘 다 최대 (api 3 + inference 3) | 노드마다 inference 1 + api 1 (1,200m / 1,280m) | 들어간다, **여유 30m**. 노드에 묶이지 않는 Pod 가 80m 를 넘으면 안 들어간다 |
 | inference 3 + api 3 이상 | api 3번째 Pending | CloudWatch add-on 현행 기준의 용량 한계. 결과로 기록 |
 | P1 (선택) | api 2개 → N3 고정, inference N1·N2 | 그 회차만 노드 단위 고가용성 포기 |
 | V3 (주입) | inference 2개 → 한 노드 | preferred 의 대가 측정 |
@@ -984,11 +988,11 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 
 | 번호 | 작업 | 완료 기준 |
 |---|---|---|
-| 5-1 | 읽기 전용 확인: RDS `max_connections`, CloudWatch add-on 최신 기본 버전 | 9.5 확인 필요 항목 정리 |
-| 5-2 | infra 변경 작성 + `plan -out`: ECR `inference`(data), inference 역할·Pod Identity·backend 권한 축소(cluster) | plan 결과 보고 |
-| 5-3 | CloudWatch add-on 결정 요청(3.12 의 O0~O4) | 사용자 결정 |
-| 5-4 | config 매니페스트 작성, `kubectl kustomize` 로 렌더링 확인. **inference livenessProbe 가 `/healthz` 를 보는지, 모델 로딩 포기(3회 실패) 시 컨테이너가 재시작되는 경로가 맞는지 검증** (3.5) | 렌더링 통과 |
-| 5-5 | CI 변경 작성(ECR 생성 뒤 push 하는 순서) | 검토 |
+| 5-1 | 읽기 전용 확인: RDS `max_connections`, CloudWatch add-on 최신 기본 버전 | 9.5 확인 필요 항목 정리. **완료 2026-10-30** (`phase1/aws-review/aws-review.md` 6, 7절). RDS 는 정지 상태라 실제 값은 못 읽고 공식·상한(112)·시나리오로 계산, 기본 버전은 v7.0.0 |
+| 5-2 | infra 변경 작성 + `plan -out`: ECR `inference`(data), inference 역할·Pod Identity·backend 권한 축소(cluster) | plan 결과 보고. **완료**: data 2 add / 1 change, cluster 34 add (기준 31 + 3). 체커 `infra/scripts/check-phase1-plan.py` 통과. apply 는 하지 않음 |
+| 5-3 | CloudWatch add-on 결정 요청(3.12 의 O0~O4) | 사용자 결정. O1 은 이전에 선택됨. **구현**: v6.7.0 고정 + 두 구성 요소 명시적 끔(P1). **버전(P1 대 P2=v7.0.0) 확정은 사용자 결정 대기** |
+| 5-4 | config 매니페스트 작성, `kubectl kustomize` 로 렌더링 확인. **inference livenessProbe 가 `/healthz` 를 보는지, 모델 로딩 포기(3회 실패) 시 컨테이너가 재시작되는 경로가 맞는지 검증** (3.5) | 렌더링 통과. **렌더링 완료 2026-10-30**: 21개 오브젝트, `config repo/scripts/check-phase1-render.py` 통과. 단 실제 `config.env` 에 `ECR_INFERENCE` 가 없어(ECR 생성 전) 저장소 그대로는 렌더링이 실패한다 — ECR apply 뒤 `config.env` 재생성 필요. Probe 값은 EKS 로딩 시간으로 재조정 |
+| 5-5 | CI 변경 작성(ECR 생성 뒤 push 하는 순서) | 검토. **작성 완료**: backend 는 `api` 타깃, inference 추가, 태그 갱신 3줄. 정적 테스트 8개와 actionlint 통과. ECR apply 전에 push 하면 inference 잡이 실패하고 update-config 가 막힌다 |
 
 **6. EKS 배포와 성능 측정** 🔒
 
@@ -996,7 +1000,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 |---|---|
 | 6-1 | 🔒 data 스택 apply(ECR) → CI push → 이미지 2개 확인 |
 | 6-2 | 🔒 재구축(기존 순서, cluster 스택에 Pod Identity 포함). 직후 노드 요청 합과 CloudWatch 구성 요소 확인(9.2) |
-| 6-3 | config push → Argo CD 동기화 → 클러스터 확인(9.3), V1 |
+| 6-3 | config push → Argo CD 동기화 → 클러스터 확인(9.3), V1. **IAM 분리 검증**: inference 서비스어카운트로 만든 임시 Pod 에서 사진 버킷·Secrets Manager 가 AccessDenied 이고 모델 버킷은 읽히는지, backend 서비스어카운트에서 모델 버킷이 AccessDenied 인지 (`phase1/aws-review/deploy-checklist.md` G7). IMDS 와 RDS 5432 도달 가능성은 **해결하지 않는 위험의 증거**로 기록 |
 | 6-3b | **장애 격리 검증 (EKS)** — 로컬 Compose 에서 한 시나리오를 EKS 에서도 한다 (`phase1/local/compose-drills.md` 의 표와 같은 순서): `kubectl scale deploy/inference --replicas=0`(inference 없음), Pod 삭제(모델 로딩 중), `rollout restart`·노드 drain(재시작 중), `INFERENCE_FAULT_DELAY_MS` 주입(마감 초과), k6 동시 요청. 각 시나리오에서 **관리자 API(로그인·목록·`/readyz`)** 와 **사진 탐지(503)** 를 따로 기록. 특히: 탐지 503 이 나오기까지 시간(로컬은 DNS 실패 시도당 약 4초 + 재시도로 8.3~8.6초였다. Service 이름은 엔드포인트 없이도 해석되므로 다를 것으로 예상, 미확인), 연결 타임아웃이 1초에 실제로 끊는지, 요청 손실 구간, PDB·readiness 효과 |
 | 6-4 | 사전 등록 "고정" 커밋 → E0~E3, T1~T3 (클러스터 안 k6 Job) → 공식 구성 값 커밋 |
 | 6-5 | 로컬 PC k6 → ALB: S0~S5, X1, V2·V3, (선택) P1 |
@@ -1050,3 +1054,5 @@ RDS 는 2026-11-04 에 자동으로 다시 켜진다. 단계 6 을 그 전에 �
 | F4 | 클러스터 해체 뒤에도 남는 로그·지표 | 장기 운영 | 로그 그룹을 cluster 스택 밖으로, Prometheus 원격 저장 | 저장 비용 |
 | F5 | 다중 칸 장비 | 장비 1대가 여러 주차면을 볼 때 | 사건 상태를 Machine 에서 ParkingZone 으로, MessageGroupId 를 zone 으로 | 데이터 모델 변경 |
 | F6 | inference 멀티프로세스 / 스레드 안전성 검증 | E2 에서 프로세스 수 효과가 클 때 | 모델 동시 호출 안전성 검증 뒤 락 범위 재검토, prometheus-client 멀티프로세스 모드 | 검증 비용 |
+| F7 | **Pod 의 노드 IAM 역할 경로 차단 / RDS 포트 차단** | 보안 강화 단계, 또는 CloudWatch 에이전트·ALB 컨트롤러·EBS CSI 가 IMDS 를 쓰는지 확인된 뒤 | IMDS 홉 제한 1 (확인 전에는 깨질 수 있음), 또는 VPC CNI 네트워크 정책을 켜고 inference 에서 `169.254.169.254` 와 RDS 5432 이그레스 차단 | 애드온 설정 변경, 정책 검증 |
+| F8 | **AI 호출 전에 DB 세션 반환** | AI 가 느릴 때 DB 연결 점유가 문제로 측정될 때 | `require_device` 가 연 트랜잭션을 AI 호출 전에 닫으면 AI 대기 중 연결 점유가 사라진다 | `device.py` 수정이라 판정·이벤트 규칙 불변을 테스트로 보장해야 함, 별도 승인 |

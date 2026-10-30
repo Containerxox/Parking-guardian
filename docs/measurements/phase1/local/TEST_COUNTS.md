@@ -15,14 +15,15 @@
 | 2-5 http 백엔드·readyz | `1861dcb` | +21 | 176 | `test_http_backend.py` 21 |
 | 2-6 진입점·gunicorn 설정 | `899a74f` | +20 | 196 | `test_inference_entrypoints.py` 20 |
 | 3-1 Docker 구성 | `05e1230` | +9 | 205 | `test_docker_layout.py` 9 (Dockerfile 타깃, 요구사항 파일, compose 파일의 정적 점검) |
-| 4 시뮬레이터 비교 도구 | (미커밋) | +6 | 211 | `test_compare_pc_event_runs.py` 6 (Prototype 대비 비교 함수) |
+| 4 시뮬레이터 비교 도구 | `e4e7ae0` | +6 | 211 | `test_compare_pc_event_runs.py` 6 (Prototype 대비 비교 함수) |
+| 5 CI 워크플로 | (미커밋) | +8 | 219 | `test_ci_workflow.py` 8 (backend `api` 타깃, inference 추가, 태그 갱신 3줄, 순서 안전장치) |
 
-## 211개의 파일별 내역
+## 219개의 파일별 내역
 
 | 구분 | 파일 | 개수 |
 |---|---|---|
 | Prototype 기존 (57) | `test_config_and_seed_secrets` 5, `test_episodes` 12, `test_event_mode_integration` 2, `test_health` 6, `test_metrics` 5, `test_operator_indicators` 1, `test_permissions` 3, `test_storage_s3` 4, `test_tenant_isolation` 7, `test_violation_flow` 12 | 57 |
-| Phase 1 신규 (154) | `test_inference_contract` 16, `test_inference_service` 23, `test_inference_service_isolation` 1, `test_inference_model_load` 3, `test_inference_admission` 10, `test_inference_http` 45, `test_http_backend` 21, `test_inference_entrypoints` 20, `test_docker_layout` 9, `test_compare_pc_event_runs` 6 | 154 |
+| Phase 1 신규 (162) | `test_inference_contract` 16, `test_inference_service` 23, `test_inference_service_isolation` 1, `test_inference_model_load` 3, `test_inference_admission` 10, `test_inference_http` 45, `test_http_backend` 21, `test_inference_entrypoints` 20, `test_docker_layout` 9, `test_compare_pc_event_runs` 6, `test_ci_workflow` 8 | 162 |
 
 Prototype 기존 57개는 Phase 1 작업 중 한 번도 수정하지 않았고 모두 통과한다 (Prototype 판정·응답 규칙 유지 확인).
 

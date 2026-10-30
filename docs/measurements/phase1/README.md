@@ -68,7 +68,7 @@ C = E3 에서 잰 서비스 전체 처리 용량(장/초).
 | S1 | 일반 API 5 req/s + 사진 0.2C → 0.5C → 0.8C → 1.0C → 1.2C → 1.5C (각 3분) | A |
 | S2 | 사진 20건 동시 후 유휴 | A |
 | S3 | 사진 1.2C, 10분 지속, 이후 회복 관찰 | A |
-| S4 | S1 프로필, HPA 켬. 노드 3대 용량 때문에 두 프로필로 나눈다: (가) inference 최대 3 + api 최대 2, (나) api 최대 4 + inference 최대 2 ("일반 API 만 3배" 부하). Pending 이 생기면 결과로 기록 | B |
+| S4 | S1 프로필, HPA 켬. 노드 3대 용량 때문에 프로필을 나눈다: (가) inference 최대 3 + api 최대 2, (나) api 최대 3 + inference 최대 2, (다) 둘 다 최대 3 ("일반 API 만 3배" 부하는 (나)). 최대 3 은 실험 환경의 시작 기준이다. (다)는 노드 여유가 30m 뿐이라 재구축 직후 노드별 요청 합을 확인한 뒤 실행한다. Pending 이 생기면 결과로 기록 | B |
 | S5 | **주입 실험**: (a) inference 0개 (b) inference 지연 주입(테스트 전용 설정) (c) api Pod 1개 삭제 | A |
 | V1 | 배치 기록: 배포 직후, 각 시나리오 전후, 롤링 뒤 inference·api 가 어느 노드에 있는지 | — |
 | V2 | 부하 중 inference 가 있는 노드 1대 cordon + drain (분산 상태) → 서비스 지속, PDB, 재배치·Ready 시간 | A |
@@ -78,6 +78,13 @@ C = E3 에서 잰 서비스 전체 처리 용량(장/초).
 - 비교 A(동일 자원): HPA 끔, api 2 + inference 2 고정.
 - 비교 B(운영 자동 확장): HPA 켬, 같은 노드 3대.
 - k6 위치: 5.1(E0~E3)과 T1 은 클러스터 안 작은 k6 Job(CPU 요청 100m). 5.2 와 T2·X1 은 로컬 PC 에서 ALB 로. 두 위치가 같은 스크립트 파일을 쓴다.
+
+### 5.3 관찰 항목 (판정 기준이 아니라 기록 항목)
+
+- **AI 응답 대기 중 API 의 DB 연결 점유**: AI 를 기다리는 동안 요청이 트랜잭션을 연 채 DB 연결을 잡는다(코드로 확인, 미측정). S1/S4 중 `pg_stat_activity` 의 `idle in transaction` 수를 AI 호출 시간·`pg_ai_client_in_flight` 와 함께 기록한다. 동시 호출 상한이 이 수를 제한하는지 본다.
+- 최대 상태(api 3 + inference 3)에서 롤링 업데이트의 지연 (surge Pod Pending, `maxUnavailable 0` 이라 서비스는 유지).
+- AI 가 없을 때 탐지 503 이 나오기까지의 시간(로컬 Docker 는 DNS 때문에 8.3~8.6초. Kubernetes Service 는 다를 것으로 예상, 미확인).
+- 재구축 직후 `amazon-cloudwatch` 의 구성 요소와 CPU 요청 합, 노드별 요청 합.
 
 ## 6. 환경
 
