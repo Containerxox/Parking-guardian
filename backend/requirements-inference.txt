@@ -1,0 +1,12 @@
+# Inference service only (Dockerfile target "inference"). torch and the YOLOv5 packages are installed before this
+# file, exactly as for the prototype image. Everything the API needs for its database, login, CORS and S3 is left
+# out on purpose: tests/test_inference_service_isolation.py shows the service starts without them.
+#
+# `requests` is not listed: it is only needed for INFERENCE_BACKEND=http, and YOLOv5 pulls it in anyway.
+Flask>=3.1,<4
+python-dotenv>=1.0,<2
+prometheus-client>=0.21,<1
+
+# Pinned to the version the service was checked with (Linux container, 2026-10-30). requirements.txt keeps its
+# range for the API and the prototype, which this step does not change.
+gunicorn==26.2.0

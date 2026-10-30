@@ -169,7 +169,7 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 
 **`X-Request-Id` 는 추적용이다.** 양쪽 로그를 잇는 용도이며, 서비스는 이 값으로 중복 추론을 막지 않는다(멱등성 키가 아니다). 중복 분석은 재시도 규칙(서비스가 거절했거나 받지 못한 요청만 반복, 읽기 타임아웃·전송 뒤 끊김은 반복하지 않음)으로 피한다.
 
-**전체 마감(deadline)의 한계.** `requests` 의 타임아웃은 소켓 동작 단위(연결, 데이터를 기다리는 각 시점)이지 전체 시간이 아니다. DNS 조회는 연결 타임아웃에 포함되지 않고, 응답을 조금씩 흘려 보내는 서버는 마감을 넘길 수 있다. AI 서비스는 분석이 끝난 뒤 한 번에 응답하므로 실제로는 읽기 타임아웃(= 남은 시간)이 호출을 제한하지만, 10초는 보장값이 아니라 설계 목표다.
+**전체 마감(deadline)의 한계.** `requests` 의 타임아웃은 소켓 동작 단위(연결, 데이터를 기다리는 각 시점)이지 전체 시간이 아니다. DNS 조회는 연결 타임아웃에 포함되지 않고, 응답을 조금씩 흘려 보내는 서버는 마감을 넘길 수 있다. AI 서비스는 분석이 끝난 뒤 한 번에 응답하므로 실제로는 읽기 타임아웃(= 남은 시간)이 호출을 제한하지만, 10초는 보장값이 아니라 설계 목표다. **실측(Docker Desktop, 2026-10-30):** inference 컨테이너가 없을 때 이름 해석 실패에 시도당 약 4초가 걸려, 연결 실패 1회 재시도를 합쳐 탐지 503 이 8.5초에 나왔다(마감 안이지만 여유 1.5초). Kubernetes Service 이름은 엔드포인트가 없어도 해석되므로 같은 현상은 아닐 것으로 예상하나 확인하지 않았다(`phase1/local/compose-drills.md`).
 
 **readyz 에서 AI 를 빼는 이유**: AI 장애 → 모든 API Pod NotReady → ALB 가 관리자 API 까지 503 이 된다. 분리의 목적이 장애 격리이므로 API readiness 는 DB 만 본다.
 
@@ -195,7 +195,7 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 
 | Probe | 경로 | 제안 | 이유 |
 |---|---|---|---|
-| startupProbe | `/readyz` | 5초 간격 × 36회 (180초) 안에 200 이 되어야 함 | 모델 로딩이 멈추거나(예외 없이) 오래 걸리는 경우도 잡는다. 180초는 로컬 28초의 약 6배인 **임시 여유값**이고, EKS 에서 첫 기동 시간을 재서 정한다. startup 이 성공하기 전에는 liveness 가 쉬므로, 로딩 중인 Pod 가 liveness 로 죽지 않는다 |
+| startupProbe | `/readyz` | 5초 간격 × 36회 (180초) 안에 200 이 되어야 함 | 모델 로딩이 멈추거나(예외 없이) 오래 걸리는 경우도 잡는다. 180초는 로컬 28초(Linux 컨테이너 실측 준비 시간 20~30초, 실행마다 변동)의 약 6배인 **임시 여유값**이고, EKS 에서 첫 기동 시간을 재서 정한다. startup 이 성공하기 전에는 liveness 가 쉬므로, 로딩 중인 Pod 가 liveness 로 죽지 않는다 |
 | readinessProbe | `/readyz` | 5초 간격, 실패 3회 | 모델이 ready 일 때만 Service 에 들어온다. busy 는 반영하지 않는다(3.5) |
 | livenessProbe | `/healthz` | 10초 간격, 실패 3회 | 로딩 포기(`gave_up`) 뒤 503 이 되어 컨테이너가 재시작된다. 요청 스레드가 모두 막힌 경우도 `/healthz` 가 응답하지 못해 잡는다 |
 
@@ -414,6 +414,7 @@ inference 단독, k6 closed-loop.
 
 - 대기 줄 끝 사진의 응답 시간이 API 마감에 얼마나 가까운가. 로컬 PC 에서 torch 스레드 1개일 때 동시 4장 중 대기 2장째 응답이 **9.85초**로 기본 마감(`AI_CLIENT_DEADLINE` 10초)에 근접했다. T3 식에 이 로컬 값(약 3.5초)을 넣으면 3.5 × (1 + 2) + 1 = 11.5초로 10초를 넘는다. 로컬 값은 결정 근거가 아니며, EKS 의 E0 p99 로 다시 계산한다.
 - 마감을 넘기는 사진이 실제로 생기는지(`pg_ai_client_requests_total{outcome="timeout"}`), 마감 직전에 끝난 사진이 API 쪽에서는 이미 포기되어 낭비되는 비율.
+- **같은 설정의 반복 실행에서도 시간이 크게 달랐다**(Linux 컨테이너, 스레드 1: 사진당 중앙값 1.98초와 3.24초, 준비 20.2초와 29.7초). E0 는 사전 등록의 3회 반복을 지키고 범위를 함께 기록하며, 로컬 한 번의 값은 크기 정도로만 쓴다.
 - 스레드 수(E1)와 대기 상한(T1)이 서로 영향을 준다: 사진당 시간이 줄면 같은 대기 상한에서도 줄 끝 응답이 빨라진다.
 
 T1~T3 결과로 정한 값이 **Phase 1 공식 구성**이 되고, 그 값으로 S0~S5 를 실행한다. 선택 규칙에 맞는 후보가 없으면 그 사실을 기록하고 가장 가까운 후보를 쓴다.
@@ -836,8 +837,9 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | `backend/wsgi_inference.py`, `backend/gunicorn_inference.conf.py` (신규) | AI 서비스 진입점과 웜업 훅 | 2 |
 | `backend/gunicorn.conf.py` | 로컬 추론일 때만 웜업 | 2 |
 | `backend/tests/test_inference_service.py`, `test_inference_http.py` (신규), `test_health.py`·`test_metrics.py` | 대기 상한, 상태별 응답, 계약, 타임아웃·재시도·동시 상한·예외 매핑, readyz | 2 |
-| `backend/Dockerfile` | 멀티 타깃 `api`(torch 없음) / `inference` | 3 |
-| `docker-compose.yml` | inference 서비스, backend `INFERENCE_BACKEND=http` | 3 |
+| `backend/Dockerfile` | 멀티 타깃 `prototype`(마지막 = 기본값, 기존 빌드) / `api`(torch 없음) / `inference` | 3 |
+| `backend/requirements-inference.txt` (신규) | inference 이미지 전용 의존성(Flask, dotenv, prometheus-client, `gunicorn==26.2.0`) | 3 |
+| `docker-compose.phase1.yml` (신규) | `docker-compose.yml` 위에 겹쳐 쓴다: inference 서비스, backend 를 `api` 타깃·`INFERENCE_BACKEND=http` 로. **`docker-compose.yml` 은 바꾸지 않는다**(Prototype 실행 보존, 2026-10-30 사용자 지시) | 3 |
 | `docs/measurements/phase1/local/` (신규) | 로컬 통합·회귀·시뮬레이터 결과 | 3, 4 |
 | `.github/workflows/build-push.yml` | matrix 에 inference(타깃 지정), config 레포 태그 3줄 | 5 |
 | `docs/adr/0018…`, `docs/measurements/phase1/README.md` | 측정 뒤 값·결과 | 6 |
@@ -961,10 +963,10 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 
 | 번호 | 작업 | 완료 기준 |
 |---|---|---|
-| 3-1 | Dockerfile 멀티 타깃. `api` 는 torch·YOLOv5·OpenCV 없음 | 두 이미지 빌드, `api` 이미지에서 `import torch` 실패 확인 |
+| 3-1 | Dockerfile 멀티 타깃. `api` 는 torch·YOLOv5·OpenCV 없음 | 두 이미지 빌드, `api` 이미지에서 `import torch` 실패 확인. **완료 2026-10-30**: api 343 MB / inference 2.74 GB / prototype 2.89 GB (`phase1/local/docker-split.md`) |
 | 3-2 | docker-compose: inference(`/models` 마운트, 헬스체크), backend `INFERENCE_URL=http://inference:8000` | `docker compose up -d --build` 후 화면·API 정상. **inference 는 Linux gunicorn(`gunicorn_inference.conf.py`)에서 실제 YOLO 모델로 실행한다 — 2-6 에서는 Windows 실제 모델과 Linux mock 을 따로 확인했으므로 이 조합은 3단계에서 반드시 검증한다** |
 | 3-3 | 측정: 이미지 크기, 유휴 RSS(`docker stats`), 첫 추론 시간, 사진 1장 왕복 시간. `scripts/check_inference_service.py` 와 같은 항목(판정 일치, 동시 4장, 모델 실패 경로, 스레드 1/2/4 의 CPU 사용 비율)을 컨테이너에서 다시 실행하고, **`OMP_NUM_THREADS` 가 torch import 전에 적용되었는지**(스레드 1일 때 CPU/벽시계 ≈ 1)와 torch 기본 스레드 수를 기록 | `docs/measurements/phase1/local/` 기록 |
-| 3-4 | 장애 확인: `docker compose stop inference` → 관리자 API 정상, 탐지 503. 지연 주입 → 마감 안에 503. 재시작 → 복구 | 결과 기록 |
+| 3-4 | 장애 확인: `docker compose stop inference` → 관리자 API 정상, 탐지 503. 지연 주입 → 마감 안에 503. 재시작 → 복구 | 결과 기록. **완료 2026-10-30** (`phase1/local/compose-drills.md`). 3-2/3-3 도 같은 날 완료: Linux gunicorn + 실제 YOLO 판정 6/6 동일 (`phase1/local/linux-inference-check.md`) |
 
 **4. 회귀 테스트와 PC 장비 시뮬레이터**
 

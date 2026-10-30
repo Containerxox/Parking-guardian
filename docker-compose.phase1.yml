@@ -1,0 +1,64 @@
+# Phase 1 on top of docker-compose.yml: the API and the AI inference run as separate containers.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.phase1.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.phase1.yml down
+#
+# docker-compose.yml alone is unchanged and still starts the Prototype (API + models in one container).
+#
+# What this file changes:
+#   backend    built from the `api` target (no torch / YOLOv5), INFERENCE_BACKEND=http, no models mounted
+#   inference  new: the `inference` target, models mounted read-only, 127.0.0.1:8000, readiness = /readyz
+#
+# The API does not wait for the inference service (no depends_on): it must start, serve admins and answer
+# detections with 503 while the models load, which is the point of the split.
+#
+# Knobs for the drills (all optional):
+#   PHASE1_DB_NAME=parking_guardian_phase1   use another database in the same PostgreSQL instead of the dev one
+#   INFERENCE_FAULT_DELAY_MS=15000           every photo spends this long in the model slot (delay drill)
+#   TORCH_NUM_THREADS=2                      torch threads of the inference service (default 1 = starting value)
+#   GUNICORN_THREADS=8                       API threads; AI_CLIENT_MAX_CONCURRENCY must stay below it
+name: parking-guardian
+
+services:
+  backend:
+    # Own image name, so the prototype image (parking-guardian-backend) is not overwritten.
+    image: parking-guardian-api
+    build:
+      target: api
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-parking}:${POSTGRES_PASSWORD:-parking_dev_password}@db:5432/${PHASE1_DB_NAME:-parking_guardian}
+      INFERENCE_BACKEND: http
+      INFERENCE_URL: http://inference:8000
+      AI_CLIENT_DEADLINE: ${AI_CLIENT_DEADLINE:-10}
+      AI_CLIENT_MAX_CONCURRENCY: ${AI_CLIENT_MAX_CONCURRENCY:-4}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-8}
+    volumes: !override
+      - backend_storage:/data/storage
+
+  inference:
+    image: parking-guardian-inference
+    build:
+      context: ./backend
+      target: inference
+      additional_contexts:
+        yolov5: ./yolov5
+    environment:
+      INFERENCE_BACKEND: yolo
+      INFERENCE_MAX_WAITING: ${INFERENCE_MAX_WAITING:-2}
+      INFERENCE_FAULT_DELAY_MS: ${INFERENCE_FAULT_DELAY_MS:-0}
+      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-1}
+      METRICS_PORT: 9102
+    volumes:
+      # Model weights are not in the image (412 MB, not in Git).
+      - ./backend/models:/models:ro
+    ports:
+      # Localhost only, like the other services. The API reaches it by name on the compose network.
+      - "127.0.0.1:${INFERENCE_PORT:-8000}:8000"
+    healthcheck:
+      # 200 only when the models are loaded. Loading takes about half a minute on this PC, hence start_period.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    restart: unless-stopped
