@@ -61,3 +61,41 @@ def test_the_tag_edit_still_fails_loudly_when_an_image_entry_is_missing():
 
 def test_paths_that_trigger_a_build_still_cover_the_inference_code():
     assert '"backend/**"' in WORKFLOW  # inference_service/, wsgi_inference.py and the Dockerfile are under backend/
+
+
+# --- build context (added after the first Phase 1 CI run failed: `path "./inference" not found`) -------------------
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+EXPECTED_CONTEXT = {"backend": "./backend", "frontend": "./frontend", "inference": "./backend"}  # inference is built from backend/
+
+
+def declared_context(entry_text):
+    match = re.search(r"^\s+context:\s*(\S+)", entry_text, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def test_every_component_declares_its_own_build_context():
+    entries = matrix_entries()
+    assert {name: declared_context(text) for name, text in entries.items()} == EXPECTED_CONTEXT
+
+
+def test_inference_is_built_from_the_backend_directory_not_from_a_folder_named_after_it():
+    """The context used to be `./${{ matrix.component }}`, which made the inference job look for ./inference."""
+    assert "context: ./${{ matrix.component }}" not in WORKFLOW
+    assert re.search(r"^\s+context:\s*\$\{\{ matrix\.context \}\}\s*$", WORKFLOW, flags=re.MULTILINE)
+
+
+def test_every_declared_context_is_a_real_directory_with_a_dockerfile():
+    for name, text in matrix_entries().items():
+        context = declared_context(text)
+        assert context is not None, name
+        folder = REPO_ROOT / context
+        assert folder.is_dir(), f"{name}: build context {context} does not exist in the repository"
+        assert (folder / "Dockerfile").is_file(), f"{name}: no Dockerfile in {context}"
+
+
+def test_the_inference_files_the_dockerfile_copies_are_inside_its_context():
+    """The inference stage copies these paths; if the context were wrong the build would fail the same way."""
+    context = REPO_ROOT / declared_context(matrix_entries()["inference"])
+    for needed in ("requirements-inference.txt", "app", "inference_service", "wsgi_inference.py", "gunicorn_inference.conf.py"):
+        assert (context / needed).exists(), needed

@@ -50,13 +50,17 @@ jobs:
       fail-fast: false # 하나가 실패해도 다른 쪽은 끝까지 간다
       matrix:
         include:
+          # context: 빌드 컨텍스트 폴더. inference 의 소스와 Dockerfile 은 backend/ 에 있다(폴더 이름이 컴포넌트 이름과 같지 않다).
           - component: backend
+            context: ./backend
             target: api
             yolov5: false
           - component: frontend
+            context: ./frontend
             target: ""
             yolov5: false
           - component: inference
+            context: ./backend
             target: inference
             yolov5: true
 
@@ -119,7 +123,7 @@ jobs:
         if: steps.exists.outputs.exists == 'false'
         uses: docker/build-push-action@v6
         with:
-          context: ./${{ matrix.component }}
+          context: ${{ matrix.context }}
           # Dockerfile 의 멀티 타깃. frontend 는 Dockerfile 이 하나라 빈 문자열(= 무시).
           target: ${{ matrix.target }}
           # inference 만 두 번째 컨텍스트. 나머지는 빈 문자열이라 무시된다.
