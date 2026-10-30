@@ -52,6 +52,34 @@ class InferenceResult:
             "elapsed_ms": self.elapsed_ms,
         }
 
+    @classmethod
+    def from_dict(cls, body) -> "InferenceResult":
+        """Parse what `to_dict()` produced (the inference service's JSON response).
+
+        `verdict` and `sticker_count` are derived, so they are only used to check that the body agrees with
+        itself. Anything malformed becomes an InferenceError, which device.py already answers with 503.
+        """
+        try:
+            if not isinstance(body, dict):
+                raise ValueError("body is not an object")
+            verdict = body["verdict"]
+            if verdict not in (NO_VEHICLE, PERMITTED, VIOLATION):
+                raise ValueError(f"unknown verdict {verdict!r}")
+            window = body.get("window")
+            stickers = body.get("stickers", [])
+            if not isinstance(stickers, list):
+                raise ValueError("stickers is not a list")
+            elapsed_ms = body.get("elapsed_ms", 0)
+            if isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, int):
+                raise ValueError("elapsed_ms is not an integer")
+            result = cls(has_window=window is not None, stickers=stickers, window=window,
+                         elapsed_ms=elapsed_ms, backend=str(body.get("backend", "unknown")))
+            if result.verdict != verdict:
+                raise ValueError(f"verdict {verdict!r} does not match window/stickers ({result.verdict!r})")
+            return result
+        except (KeyError, ValueError, TypeError) as exc:
+            raise InferenceError(f"malformed inference response: {exc}") from exc
+
 
 class MockInference:
     """Decides from the file name: contains 'permitted' or 'novehicle', otherwise the default verdict."""
