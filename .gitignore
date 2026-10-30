@@ -11,6 +11,7 @@ roadmap.md
 # old phase names), design/EXECUTION_FLOW.md (superseded).
 docs/*
 !docs/adr/
+!docs/architecture/
 !docs/design/
 docs/design/*
 !docs/design/ARCHITECTURE_EVOLUTION.md
