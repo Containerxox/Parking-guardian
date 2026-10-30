@@ -42,6 +42,12 @@ INFERENCE_REQUESTS = Counter(
     ["verdict", "outcome"])
 INFERENCE_IN_FLIGHT = Gauge(
     "pg_inference_in_flight", "Photos inside analyze(): waiting for the lock or being processed.")
+INFERENCE_RUNNING = Gauge(
+    "pg_inference_running", "Photos inside the model right now (inference service; 0 or 1).")
+INFERENCE_WAITING = Gauge(
+    "pg_inference_waiting", "Photos queued behind the running one (inference service; at most INFERENCE_MAX_WAITING).")
+INFERENCE_REJECTED = Counter(
+    "pg_inference_rejected_total", "Photos refused with 503 busy because running and waiting were both full.")
 MODEL_LOAD_SECONDS = Gauge("pg_model_load_seconds", "Wall time of the last successful model load.")
 MODEL_STATE = Enum("pg_inference_model_state", "Model state of this process.",
                    states=["cold", "loading", "ready", "failed"])

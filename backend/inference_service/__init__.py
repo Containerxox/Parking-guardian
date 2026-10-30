@@ -8,19 +8,25 @@ with InferenceResult.from_dict.
       200 InferenceResult.to_dict()
       400 {"error": "invalid_image"}
       503 {"error": "model_unavailable"}     (loading, or the model failed to load / run)
+      503 {"error": "busy"} + Retry-After: 1 (one photo running and INFERENCE_MAX_WAITING already waiting)
     GET  /healthz      process is alive
     GET  /readyz       200 only when the model is ready
 """
 import logging
+import time
 
 from flask import Flask, jsonify, request
 
 from app.adapters.inference import InferenceError, InvalidImageError, build_inference
 from app.config import Config
+from app.metrics import INFERENCE_REJECTED  # noqa: F401  (registers the metrics this service reports)
+
+from .admission import AdmissionGate, Busy
 
 log = logging.getLogger(__name__)
 
 EXTENSION_KEY = "pg_inference"
+GATE_KEY = "pg_gate"
 
 
 def create_app(test_config: dict | None = None, inference=None) -> Flask:
@@ -33,6 +39,10 @@ def create_app(test_config: dict | None = None, inference=None) -> Flask:
         service.config.update(test_config)
     service.extensions[EXTENSION_KEY] = inference if inference is not None else build_inference(service.config)
 
+    gate = AdmissionGate(max_waiting=service.config["INFERENCE_MAX_WAITING"])
+    service.extensions[GATE_KEY] = gate
+    fault_delay = service.config["INFERENCE_FAULT_DELAY_MS"] / 1000
+
     def model():
         return service.extensions[EXTENSION_KEY]
 
@@ -41,9 +51,11 @@ def create_app(test_config: dict | None = None, inference=None) -> Flask:
         image_bytes = request.get_data()
         request_id = request.headers.get("X-Request-Id", "")
         filename = request.headers.get("X-Filename", "")
-        response, status = _analyze(model(), image_bytes, filename, request_id)
+        response, status = _analyze(model(), gate, fault_delay, image_bytes, filename, request_id)
         reply = jsonify(response)
         reply.status_code = status
+        if status == 503 and response["error"] == "busy":
+            reply.headers["Retry-After"] = "1"
         if request_id:
             reply.headers["X-Request-Id"] = request_id
         return reply
@@ -73,7 +85,7 @@ def create_app(test_config: dict | None = None, inference=None) -> Flask:
     return service
 
 
-def _analyze(model, image_bytes: bytes, filename: str, request_id: str):
+def _analyze(model, gate, fault_delay: float, image_bytes: bytes, filename: str, request_id: str):
     if not image_bytes:
         return {"error": "invalid_image"}, 400
     if getattr(model, "state", "ready") in ("loading", "failed"):
@@ -81,7 +93,12 @@ def _analyze(model, image_bytes: bytes, filename: str, request_id: str):
         # here: a NotReady Pod gets no photos from the Service anyway, so "retry on the next photo" cannot work.
         return {"error": "model_unavailable"}, 503
     try:
-        return model.analyze(image_bytes, filename).to_dict(), 200
+        with gate.slot():  # at most one photo in the model, at most max_waiting queued, the rest refused at once
+            if fault_delay:
+                time.sleep(fault_delay)
+            return model.analyze(image_bytes, filename).to_dict(), 200
+    except Busy:
+        return {"error": "busy"}, 503
     except InvalidImageError:
         return {"error": "invalid_image"}, 400
     except InferenceError:

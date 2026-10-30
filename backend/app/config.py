@@ -93,6 +93,10 @@ class Config:
     WINDOW_CONF = float(os.environ.get("WINDOW_CONF", "0.25"))
     STICKER_CONF = float(os.environ.get("STICKER_CONF", "0.5"))
     INFERENCE_IMAGE_SIZE = int(os.environ.get("INFERENCE_IMAGE_SIZE", "640"))
+    # Inference service only. Photos allowed to wait behind the one being processed; one more is refused (503 busy).
+    INFERENCE_MAX_WAITING = int(os.environ.get("INFERENCE_MAX_WAITING", "2"))
+    # Test/drill only: extra milliseconds every photo spends inside the model slot. Keep 0 in production.
+    INFERENCE_FAULT_DELAY_MS = int(os.environ.get("INFERENCE_FAULT_DELAY_MS", "0"))
     # Background model load: total attempts and the base wait between them (waits grow: delay x attempt).
     # After the last failure the inference service reports /healthz 503 so Kubernetes restarts the container.
     MODEL_LOAD_ATTEMPTS = int(os.environ.get("MODEL_LOAD_ATTEMPTS", "3"))
