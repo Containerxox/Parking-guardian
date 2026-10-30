@@ -873,6 +873,8 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 
 ### 9.2 예상 리소스 배치 (v4, 재측정 전 잠정)
 
+> 아래 CPU·메모리 Request/Limit 값은 **추정이며 확정이 아니다.** 로컬 Linux 측정(inference 최대 RSS 1363 MiB, `phase1/local/docker-split.md`)은 참고일 뿐이고, EKS 의 E0/S0 를 실측한 뒤 조정한다. torch 스레드 수도 E0/E1 에서 정한다.
+
 운영과 측정 모두 **공용 노드 그룹 m7i-flex.large 3대**다. 추가 노드 없음.
 
 | 노드 | 평상시 / 비교 A (api 2 + inference 2 고정) | CPU 요청 합 / 1,930m |
@@ -972,11 +974,11 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 
 | 번호 | 작업 | 완료 기준 |
 |---|---|---|
-| 4-1 | backend pytest(SQLite·PostgreSQL), device 17개 | 전부 통과 |
-| 4-2 | `send_detection.py sample_b ×2` → 위반 확정, 알림 1건 | Compose 환경에서 확인 |
-| 4-3 | `pc_event_test.py` sample_b(arrived → violation_pending → confirm → violation → left → 종료), sample_c(permitted) | Prototype 기록(PC_VERIFICATION)과 판정·사건 결과 동일 |
-| 4-4 | (선택) `scripts/measure.py` event 시나리오로 Prototype 대비 서버 시간 비교 | 기록 |
-| 4-5 | 결과 문서 정리, 민감정보 검사 | 커밋 승인 요청 |
+| 4-1 | backend pytest(SQLite·PostgreSQL), device 17개 | 전부 통과. **완료 2026-10-30**: backend 211(SQLite·PostgreSQL), device 17 (`phase1/local/step4-simulator.md`) |
+| 4-2 | `send_detection.py sample_b ×2` → 위반 확정, 알림 1건 | Compose 환경에서 확인. **완료**: Prototype·Phase 1 모두 200 → 201, 열린 위반 1건. 이 전송은 장비에 열린 사건을 남기므로 시뮬레이터 실행 **뒤**에 한다 |
+| 4-3 | `pc_event_test.py` sample_b(arrived → violation_pending → confirm → violation → left → 종료), sample_c(permitted) | Prototype 기록(PC_VERIFICATION)과 판정·사건 결과 동일 | **완료**: 사진 구간 900초로 arrived → confirm → violation → refresh → left 전체, 정상 차량 arrived → refresh → left. Prototype과 이벤트·응답·상태 변화·하트비트·서버 결과 동일(Phase 1 실행 2). 실행 1의 하트비트 차이와 버린 실행은 `step4-simulator.md` 에 구분해 기록
+| 4-4 | (선택) `scripts/measure.py` event 시나리오로 Prototype 대비 서버 시간 비교 | 기록. **하지 않음**(선택 항목) |
+| 4-5 | 결과 문서 정리, 민감정보 검사 | 커밋 승인 요청. 문서 정리·검사 완료, 커밋은 승인 대기 |
 
 **5. AWS 인프라 변경 검토** (plan 만)
 
@@ -995,6 +997,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 6-1 | 🔒 data 스택 apply(ECR) → CI push → 이미지 2개 확인 |
 | 6-2 | 🔒 재구축(기존 순서, cluster 스택에 Pod Identity 포함). 직후 노드 요청 합과 CloudWatch 구성 요소 확인(9.2) |
 | 6-3 | config push → Argo CD 동기화 → 클러스터 확인(9.3), V1 |
+| 6-3b | **장애 격리 검증 (EKS)** — 로컬 Compose 에서 한 시나리오를 EKS 에서도 한다 (`phase1/local/compose-drills.md` 의 표와 같은 순서): `kubectl scale deploy/inference --replicas=0`(inference 없음), Pod 삭제(모델 로딩 중), `rollout restart`·노드 drain(재시작 중), `INFERENCE_FAULT_DELAY_MS` 주입(마감 초과), k6 동시 요청. 각 시나리오에서 **관리자 API(로그인·목록·`/readyz`)** 와 **사진 탐지(503)** 를 따로 기록. 특히: 탐지 503 이 나오기까지 시간(로컬은 DNS 실패 시도당 약 4초 + 재시도로 8.3~8.6초였다. Service 이름은 엔드포인트 없이도 해석되므로 다를 것으로 예상, 미확인), 연결 타임아웃이 1초에 실제로 끊는지, 요청 손실 구간, PDB·readiness 효과 |
 | 6-4 | 사전 등록 "고정" 커밋 → E0~E3, T1~T3 (클러스터 안 k6 Job) → 공식 구성 값 커밋 |
 | 6-5 | 로컬 PC k6 → ALB: S0~S5, X1, V2·V3, (선택) P1 |
 | 6-6 | 결과 커밋, Phase 1 보고서, ADR 0018 "결정됨", ADR 0019 수정 |

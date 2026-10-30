@@ -14,14 +14,15 @@
 | 2-4 HttpInference | `f7d8a0f` | +47 | 155 | `test_inference_http.py` 45, 게이트가 프로세스 단위임을 보이는 테스트 1(admission), 파일명 디코딩 1(service) |
 | 2-5 http 백엔드·readyz | `1861dcb` | +21 | 176 | `test_http_backend.py` 21 |
 | 2-6 진입점·gunicorn 설정 | `899a74f` | +20 | 196 | `test_inference_entrypoints.py` 20 |
-| 3-1 Docker 구성 | (미커밋) | +9 | 205 | `test_docker_layout.py` 9 (Dockerfile 타깃, 요구사항 파일, compose 파일의 정적 점검) |
+| 3-1 Docker 구성 | `05e1230` | +9 | 205 | `test_docker_layout.py` 9 (Dockerfile 타깃, 요구사항 파일, compose 파일의 정적 점검) |
+| 4 시뮬레이터 비교 도구 | (미커밋) | +6 | 211 | `test_compare_pc_event_runs.py` 6 (Prototype 대비 비교 함수) |
 
-## 205개의 파일별 내역
+## 211개의 파일별 내역
 
 | 구분 | 파일 | 개수 |
 |---|---|---|
 | Prototype 기존 (57) | `test_config_and_seed_secrets` 5, `test_episodes` 12, `test_event_mode_integration` 2, `test_health` 6, `test_metrics` 5, `test_operator_indicators` 1, `test_permissions` 3, `test_storage_s3` 4, `test_tenant_isolation` 7, `test_violation_flow` 12 | 57 |
-| Phase 1 신규 (148) | `test_inference_contract` 16, `test_inference_service` 23, `test_inference_service_isolation` 1, `test_inference_model_load` 3, `test_inference_admission` 10, `test_inference_http` 45, `test_http_backend` 21, `test_inference_entrypoints` 20, `test_docker_layout` 9 | 148 |
+| Phase 1 신규 (154) | `test_inference_contract` 16, `test_inference_service` 23, `test_inference_service_isolation` 1, `test_inference_model_load` 3, `test_inference_admission` 10, `test_inference_http` 45, `test_http_backend` 21, `test_inference_entrypoints` 20, `test_docker_layout` 9, `test_compare_pc_event_runs` 6 | 154 |
 
 Prototype 기존 57개는 Phase 1 작업 중 한 번도 수정하지 않았고 모두 통과한다 (Prototype 판정·응답 규칙 유지 확인).
 
@@ -37,6 +38,16 @@ Prototype 기존 57개는 Phase 1 작업 중 한 번도 수정하지 않았고 �
 - 스레드를 쓰는 테스트(대기 상한, bulkhead, "AI 가 막혔을 때")도 PostgreSQL 에서 2회 통과했다. 인메모리 SQLite 연결 공유가 간헐 실패의 원인이라는 가설과 모순되지 않지만, 이것이 원인 확정은 아니다(아래).
 
 단계 3의 이미지·Compose 확인은 pytest 개수에 들어가지 않는다. 그것은 `backend/scripts/check_inference_service.py`(`--image`)와 `check_phase1_compose.py`가 실제 컨테이너에서 하고, 결과는 `docker-split.md`, `linux-inference-check.md`, `compose-drills.md`에 있다. 3-1 이후 SQLite 전체 205개 통과를 확인했고, PostgreSQL 전체 실행은 정적 파일 점검만 추가된 터라 다시 하지 않았다.
+
+## 단계 4: 회귀 (2026-10-30, 커밋 `05e1230` + 비교 도구)
+
+| 대상 | 결과 |
+|---|---|
+| backend, SQLite | **211 passed** |
+| backend, PostgreSQL 16 (`parking_guardian_test`) | **211 passed** (54초) |
+| device (`python -m pytest device -q`) | **17 passed** |
+
+PC 시뮬레이터와 Prototype 대비 비교는 pytest가 아니라 `step4-simulator.md`.
 
 ## 테스트 안정성 (미해결 사항 유지)
 

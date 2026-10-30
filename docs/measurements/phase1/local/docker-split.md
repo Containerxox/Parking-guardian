@@ -21,6 +21,24 @@
 | `parking-guardian-api` | **343 MB** | Prototype의 약 12%. 패키지 39개 (`image-packages-api.txt`) |
 | `parking-guardian-inference` | **2.74 GB** | Prototype보다 약 150 MB 작을 뿐이다. 크기의 대부분이 torch와 YOLOv5 의존성(OpenCV, pandas 등)이라서다. 패키지 53개 (`image-packages-inference.txt`) |
 
+### 감소율 (Prototype 이미지 대비, 두 가지 기준)
+
+크기를 재는 방법이 둘이라 둘 다 적는다. `docker images` 값은 유효 숫자 3자리로 반올림되어 있어 ±0.5% 정도의 오차가 있다.
+
+| 이미지 | 압축 전 디스크 사용량 (`docker images`) | 압축 콘텐츠 (`docker image inspect` 의 Size) |
+|---|---|---|
+| prototype | 2.89 GB | 661,592,038 B (약 661.6 MB) |
+| api | 343 MB | 84,326,847 B (약 84.3 MB) |
+| inference | 2.74 GB | 624,857,246 B (약 624.9 MB) |
+| **api / prototype** | 11.9% → **88.1% 작음** | 12.7% → **87.3% 작음** |
+| inference / prototype | 94.8% → 5.2% 작음 | 94.4% → 5.6% 작음 |
+
+### 이미지 크기 감소를 인프라 비용 감소로 읽지 않는다
+
+- 줄어든 것은 **API 이미지 하나의 크기**다. Phase 1은 API Pod와 inference Pod를 따로 띄우므로 Pod 수와 요청 자원의 합은 오히려 늘 수 있다(설계 9.2: 최소 api 2 + inference 2). 노드는 두 이미지를 모두 받는다.
+- 인프라 비용은 EC2 노드 시간, NAT, ALB, RDS 등이 지배하고 이미지 크기와는 거의 무관하다. ECR 저장 비용은 이미지가 3개(frontend 제외 시 2개 → inference 추가)로 늘어 오히려 약간 늘 수 있다. 이번에 **비용은 계산도 측정도 하지 않았다.**
+- 이미지가 작아져서 기대할 수 있는 것은 API Pod의 **Pull과 스케일 아웃 시작이 빨라질 가능성**이다. 이것도 이 PC의 로컬 빌드 크기에서 나온 추정이고, 실제 Pull 시간은 EKS에서 재야 한다(설계 2.1절 시작 시간 측정).
+
 빌드 시간: 첫 빌드(api + inference, torch 다운로드 포함) 4분 54초. Prototype 재빌드는 AI 레이어를 재사용해 43초.
 
 ## 의존성 확인 (이미지 안에서 `import`)
@@ -68,4 +86,7 @@
 
 1. **측정 변동이 크다.** 같은 이미지·같은 설정의 두 실행에서 사진당 시간이 1.98초와 3.24초, 준비 시간이 20.2초와 29.7초였다. 원인(다른 프로세스, CPU 클럭 등)은 확인하지 않았다. E0는 반복 3회 규칙(사전 등록)을 지켜야 하고, 이 문서의 숫자는 크기 정도만 본다.
 2. **torch 기본 스레드는 컨테이너가 보는 CPU 수가 아니었다.** 이 컨테이너의 `os.cpu_count()` 기준 CPU는 8개로 보이는데 기본값은 4였다. 코어 수 기준으로 정해지는 것으로 보이나 규칙은 확인하지 않았다. 2 vCPU 노드(m7i-flex.large)에서 Prototype Pod의 기본값은 **측정하지 않았고, 코어 수의 절반이라면 1일 수 있다.** 그렇다면 설계의 서비스 시작값 1이 Prototype의 실제 값과 같을 가능성이 있다. 확인은 E0 시작 때 `torch.get_num_threads()` 기록으로 한다(이미 사전 등록에 있음).
-3. **메모리 요청값과 가깝다.** 최대 1363 MiB는 설계의 inference 메모리 요청 추정치 1.5Gi에 아주 가깝다. 스레드를 늘리거나 큰 사진이 오면 더 늘 수 있고, Prototype은 limit 2Gi였다. Pod limit을 1.5Gi 근처로 두면 OOM 위험이 있다. 값은 E0에서 정한다.
+3. **메모리 Request/Limit은 아직 확정하지 않는다.** 설계 9.2의 Request/Limit 값은 여전히 **추정**이다. 이 문서의 Linux 측정(최대 RSS 1363 MiB, 이 PC)은 크기 정도를 알려 줄 뿐이고, 값은 EKS에서 E0/S0를 실측한 뒤 조정한다(사전 등록 "요청값은 E0·S0 실측 뒤 정한 값"). 아래는 근거 정리다.
+   - 최대 1363 MiB(VmHWM)는 설계의 inference 메모리 요청 추정치 1.5Gi에 아주 가깝다. 스레드를 늘리거나 큰 사진이 오면 더 늘 수 있고, Prototype은 limit 2Gi였다. limit을 1.5Gi 근처로 두면 OOM 위험이 있다.
+   - 같은 이미지·같은 설정의 반복 실행에서 사진당 시간은 1.2초부터 3.2초까지, 준비 시간은 12.8초부터 약 31초까지 나왔다(`compose-drills.md` 두 실행, `linux-inference-check.md`). 메모리(사진 12장 뒤 RSS)도 두 실행에서 1077 MiB와 1181 MiB로 달랐다(로딩 직후는 둘 다 925 MiB).
+   - torch CPU 스레드 수(시작값 1)도 같은 원칙이다: EKS의 E0/E1에서 최종 결정한다.
