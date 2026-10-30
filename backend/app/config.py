@@ -85,7 +85,21 @@ class Config:
     MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "15")) * 1024 * 1024
 
     # --- AI inference ---
-    INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "yolo")  # yolo | mock
+    INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "yolo")  # yolo | mock | http
+    # --- http backend (API calls the separate inference service, ADR 0018) ---
+    # INFERENCE_BACKEND=http needs INFERENCE_URL (the app refuses to start without it). The numbers below are
+    # starting points, not operating values: the deadline and the concurrency limit are chosen from E0/S0
+    # (design doc 4.2, T2/T3).
+    INFERENCE_URL = os.environ.get("INFERENCE_URL", "")  # e.g. http://inference:8000
+    AI_CLIENT_DEADLINE = float(os.environ.get("AI_CLIENT_DEADLINE", "10"))  # seconds for the whole call, retries included
+    AI_CLIENT_CONNECT_TIMEOUT = float(os.environ.get("AI_CLIENT_CONNECT_TIMEOUT", "1"))
+    AI_CLIENT_RETRIES = int(os.environ.get("AI_CLIENT_RETRIES", "1"))  # extra attempts on busy / could not connect
+    # Calls to the AI service allowed at once (the bulkhead). Keep it BELOW the number of API threads, or every
+    # thread can end up waiting for the AI and the admin API starves.
+    AI_CLIENT_MAX_CONCURRENCY = int(os.environ.get("AI_CLIENT_MAX_CONCURRENCY", "4"))
+    # Only read to warn about a bulkhead that is not smaller than the thread count; gunicorn gets the value
+    # from the same variable on its command line (Dockerfile CMD).
+    GUNICORN_THREADS = int(os.environ.get("GUNICORN_THREADS", "4"))
     YOLOV5_DIR = os.environ.get("YOLOV5_DIR", str(BASE_DIR.parent / "yolov5"))
     WINDOW_MODEL_PATH = os.environ.get("WINDOW_MODEL_PATH", str(BASE_DIR / "models" / "default.pt"))
     STICKER_MODEL_PATH = os.environ.get("STICKER_MODEL_PATH", str(BASE_DIR / "models" / "last.pt"))

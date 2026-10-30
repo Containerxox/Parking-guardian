@@ -333,7 +333,19 @@ class HttpInference:
     the wait for the first byte of the answer, which is the whole analysis because the service replies once.
 
     Bulkhead: at most `max_concurrency` calls at the same time; the next one fails immediately, so a slow
-    inference service cannot hold every API thread (the admin API keeps its threads).
+    inference service cannot hold every API thread (the admin API keeps its threads). The default 4 is NOT an
+    operating value: with 4 API threads it would let every thread wait for the AI. It must stay below the thread
+    count and is chosen from E0/S0 (design doc 4.2, T2); build_inference warns when it does not.
+
+    X-Request-Id is for tracing only (logs on both sides). It is NOT an idempotency key: the service does not
+    deduplicate on it. Duplicate analysis is avoided by the retry rules above (only requests the service
+    refused or never received are repeated), not by the id.
+
+    Known limit of the deadline: it is enforced between attempts and through the `requests` timeouts, which are
+    per socket operation (connect, then each wait for data), not a wall-clock total. DNS lookup is not covered
+    by the connect timeout, and a server that sends its answer in slow pieces can run past the deadline. The
+    inference service replies in one piece after the analysis, so in practice the read timeout (= time left)
+    bounds the call, but the 10 s is a design target, not a guarantee.
 
     `device.py` is unchanged: InferenceError -> 503 inference_unavailable, InvalidImageError -> 400.
     """
@@ -349,7 +361,8 @@ class HttpInference:
         self.retries = max(0, int(retries))
         self.retry_backoff = float(retry_backoff)
         self.max_retry_wait = float(max_retry_wait)
-        self._slots = threading.BoundedSemaphore(max(1, int(max_concurrency)))
+        self.max_concurrency = max(1, int(max_concurrency))
+        self._slots = threading.BoundedSemaphore(self.max_concurrency)
         self._clock = clock
         self._sleep = sleep
         if session is None:
@@ -464,10 +477,30 @@ def _may_have_reached_the_service(exc) -> bool:
     return isinstance(cause, (urllib3.exceptions.ProtocolError, urllib3.exceptions.ReadTimeoutError))
 
 
+def _build_http_inference(config) -> HttpInference:
+    url = config.get("INFERENCE_URL")
+    if not url:
+        raise ValueError("INFERENCE_BACKEND=http needs INFERENCE_URL (for example http://inference:8000)")
+    limit = config.get("AI_CLIENT_MAX_CONCURRENCY", 4)
+    threads = config.get("GUNICORN_THREADS", 4)
+    if limit >= threads:
+        log.warning("AI_CLIENT_MAX_CONCURRENCY=%s is not below the %s API threads: every thread can end up waiting "
+                    "for the inference service. Choose the value from the E0/S0 measurements.", limit, threads)
+    return HttpInference(
+        url,
+        deadline=config.get("AI_CLIENT_DEADLINE", 10.0),
+        connect_timeout=config.get("AI_CLIENT_CONNECT_TIMEOUT", 1.0),
+        retries=config.get("AI_CLIENT_RETRIES", 1),
+        max_concurrency=limit,
+    )
+
+
 def build_inference(config) -> object:
     backend = config.get("INFERENCE_BACKEND", "yolo")
     if backend == "mock":
         return MockInference(config.get("MOCK_INFERENCE_VERDICT", VIOLATION))
+    if backend == "http":
+        return _build_http_inference(config)
     return YoloInference(
         yolov5_dir=config["YOLOV5_DIR"],
         window_model_path=config["WINDOW_MODEL_PATH"],

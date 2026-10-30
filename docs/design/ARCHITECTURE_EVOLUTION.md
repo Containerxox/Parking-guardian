@@ -163,9 +163,13 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 | 연결 타임아웃 | 1초 | 고정(클러스터 내부) |
 | 전체 마감 `AI_CLIENT_DEADLINE` | 10초 | T3 (4.2): E0 p99 × (1 + 대기 상한) + 여유 |
 | 재시도 `AI_CLIENT_RETRIES` | 1 (busy·연결 실패만, 마감 안에서) | 고정. 2회 이상은 과부하 증폭 |
-| 동시 상한 `AI_CLIENT_MAX_CONCURRENCY` | 4 (스레드 8 의 절반) | **T2 (4.2) 로 조정** |
+| 동시 상한 `AI_CLIENT_MAX_CONCURRENCY` | 4 (스레드 8 의 절반). **운영값이 아닌 시작값** | **T2 (4.2) 로 조정.** 스레드 수보다 작아야 한다. 현재 Dockerfile 기본 스레드가 4 라서 기본값 4 는 모든 스레드를 AI 대기에 쓸 수 있다. `build_inference` 가 상한 ≥ `GUNICORN_THREADS` 이면 경고를 남긴다 |
 | 예외 매핑 | 타임아웃·연결·5xx·busy → `InferenceError`, 400 → `InvalidImageError` | `device.py` 수정 없이 기존 503/400 계약 유지 |
 | `state` | `"remote"` | readyz 가 AI 상태로 API 를 NotReady 로 만들지 않게 |
+
+**`X-Request-Id` 는 추적용이다.** 양쪽 로그를 잇는 용도이며, 서비스는 이 값으로 중복 추론을 막지 않는다(멱등성 키가 아니다). 중복 분석은 재시도 규칙(서비스가 거절했거나 받지 못한 요청만 반복, 읽기 타임아웃·전송 뒤 끊김은 반복하지 않음)으로 피한다.
+
+**전체 마감(deadline)의 한계.** `requests` 의 타임아웃은 소켓 동작 단위(연결, 데이터를 기다리는 각 시점)이지 전체 시간이 아니다. DNS 조회는 연결 타임아웃에 포함되지 않고, 응답을 조금씩 흘려 보내는 서버는 마감을 넘길 수 있다. AI 서비스는 분석이 끝난 뒤 한 번에 응답하므로 실제로는 읽기 타임아웃(= 남은 시간)이 호출을 제한하지만, 10초는 보장값이 아니라 설계 목표다.
 
 **readyz 에서 AI 를 빼는 이유**: AI 장애 → 모든 API Pod NotReady → ALB 가 관리자 API 까지 503 이 된다. 분리의 목적이 장애 격리이므로 API readiness 는 DB 만 본다.
 
