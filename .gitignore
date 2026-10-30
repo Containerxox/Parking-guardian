@@ -3,7 +3,25 @@ CLAUDE.md
 .claude/
 prd.md
 roadmap.md
-docs/
+
+# docs: local by default. Only the files below are public (portfolio).
+# Before committing anything under docs/, check for account IDs, domains, ARNs, keys and personal names
+# (docs/design/ARCHITECTURE_EVOLUTION.md 10.2).
+# Excluded on purpose: legacy/ (original team repo and member names), REFACTORING_PLAN.md (member names,
+# old phase names), design/EXECUTION_FLOW.md (superseded).
+docs/*
+!docs/adr/
+!docs/design/
+docs/design/*
+!docs/design/ARCHITECTURE_EVOLUTION.md
+!docs/design/API.md
+!docs/design/FLOW_*.md
+!docs/measurements/
+docs/measurements/*
+!docs/measurements/*.md
+!docs/measurements/*.json
+!docs/measurements/*.log
+!docs/measurements/phase1/
 
 # YOLOv5 source (external, pinned separately)
 yolov5/
