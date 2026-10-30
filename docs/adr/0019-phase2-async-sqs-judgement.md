@@ -37,7 +37,7 @@ Phase 1 에서도 장비 요청은 판정이 끝날 때까지 연결과 API 스�
 8. **confirm**: Worker 가 `device_commands` 에 `capture_confirm`(`due_at` = 접수 + 60초, `expires_at` = due + 9분)을 만든다. Heartbeat 응답이 명령을 싣고, 장비는 max(due_at, 받은 시각)에 찍는다. 장비는 실행한 command_id 를 기록해 중복 실행하지 않는다.
 9. **장비**: 로컬 아웃박스(디스크), seq 순서 전송, full jitter 지수 백오프(최대 60초, `Retry-After` 존중), 이벤트별 포기 기준(refresh·confirm 10분, arrived·left 30분), 202·200(중복) 모두 성공.
 10. **보존**: 판별용 임시 사진 `inbox/` 7일, 확정 증거 `violations/` 90일(지금은 기록만 하는 `IMAGE_RETENTION_DAYS` 를 수명 주기로 실제 적용), 작업 행 30일, DLQ 4일.
-11. **확장**: KEDA SQS 스케일러, min 1(모델 로딩 때문에 0 은 쓰지 않음).
+11. **확장**: KEDA SQS 스케일러, min 1(모델 로딩 때문에 0 은 쓰지 않음). 노드는 Phase 1 과 같은 공용 노드 그룹 3대이고 Worker·API 공존을 허용한다. max 는 노드 수가 아니라 노드별 CPU 요청 여유로 정한다. Phase 1 과의 공식 비교는 같은 노드 사양·수·요청값·시나리오로 한다.
 
 ## 이유
 
