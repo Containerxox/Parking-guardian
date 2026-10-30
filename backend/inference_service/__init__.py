@@ -38,6 +38,8 @@ def create_app(test_config: dict | None = None, inference=None) -> Flask:
     service.config.from_object(Config)  # same env names as the API (model paths, confidences, MAX_UPLOAD_MB)
     if test_config:
         service.config.update(test_config)
+    if not service.config.get("TORCH_NUM_THREADS"):
+        service.config["TORCH_NUM_THREADS"] = 1  # the service default; the Prototype API keeps the torch default
     service.extensions[EXTENSION_KEY] = inference if inference is not None else build_inference(service.config)
 
     gate = AdmissionGate(max_waiting=service.config["INFERENCE_MAX_WAITING"])

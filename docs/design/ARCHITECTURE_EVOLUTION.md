@@ -181,13 +181,27 @@ Flask 를 재사용한다(`inference_service/` 앱 팩토리 + 라우트 1개). 
 | 스레드 | 4 | 대기 상한 + 2 (추론 1 + 헬스체크 1) 이상 |
 | 동시 추론 | 1 (기존 락) | 락은 스레드 안전성 검증 전에는 제거하지 않음 |
 | 대기 상한 `INFERENCE_MAX_WAITING` | 2 | **T1 (4.2) 로 조정** |
-| torch 스레드 `TORCH_NUM_THREADS` | 1 (지금 Pod 안 값 [확인]) | E1 |
+| torch 스레드 `TORCH_NUM_THREADS` | 서비스 **시작값** 1 (**운영값이 아니다. EKS 의 E0/E1 로 정한다**). **Prototype 은 설정하지 않고 torch 기본값(보이는 코어 수)으로 돈다** (코드·Dockerfile·매니페스트 확인. Pod 안 값은 미측정). 이 PC(4코어) 실측: 1개 3.52초, 2개 2.20초, 4개 1.51초 (`phase1/local/inference-service-check.md`). `torch.set_num_threads` 만으로는 스레드 풀에 일관되게 적용되지 않아 `OMP_NUM_THREADS` 도 설정한다 | E1 (EKS 에서 비교). 환경변수(`OMP_NUM_THREADS`)가 Linux gunicorn 에서 torch import 전에 적용되는지 3-3 에서 확인 |
 | readiness | 모델 ready 일 때만 200. busy 는 반영 안 함 | 부하로 NotReady 가 되면 남은 Pod 로 몰려 연쇄 장애 |
 | 모델 로딩 실패 | 백그라운드 최대 3회(`MODEL_LOAD_ATTEMPTS`) 시도 뒤 `/healthz` 503 → livenessProbe 로 컨테이너 재시작 | 단계 5-4 에서 inference Deployment 의 livenessProbe 가 `/healthz` 를 보는지 확인 |
 
 **대기 상한은 프로세스 안의 제한이다.** `AdmissionGate`(`inference_service/admission.py`)는 한 프로세스의 메모리 안에서만 센다. gunicorn worker 가 2개면 worker 마다 모델 1개 + 대기 2개씩 따로 허용되어 상한이 2배가 되고, 모델 메모리도 2배가 된다. 그래서 AI 서비스는 **worker 1개** 전제다(3.5 첫 행). 2-6 에서 gunicorn 설정이 `workers=1` 을 강제하는지 확인하고, Pod 를 늘려 얻는 전체 상한은 "Pod 수 × (1 + 대기 상한)" 이다.
 
 **게이트가 디코드까지 직렬화한다.** `AdmissionGate` 는 `analyze()` 전체를 감싸므로 이미지 디코드(`cv2.imdecode`)도 한 번에 하나씩 실행된다. Prototype 은 디코드가 락 밖이라 병렬이었다. 측정 없이 최적화하지 않고, E1 에서 함께 비교한다(4.1).
+
+### 3.5.1 inference Probe 구성 검토 (제안, 아직 매니페스트 아님)
+
+근거는 `phase1/local/inference-service-check.md` 의 로컬 값(모델 준비까지 28.4초, 모델 로딩 실패 시 포기까지 약 34.5초)이다. EKS(2 vCPU)는 더 느릴 수 있으나 **측정하지 않았다**. 아래 시간은 6-2 에서 실측한 뒤 정한다.
+
+| Probe | 경로 | 제안 | 이유 |
+|---|---|---|---|
+| startupProbe | `/readyz` | 5초 간격 × 36회 (180초) 안에 200 이 되어야 함 | 모델 로딩이 멈추거나(예외 없이) 오래 걸리는 경우도 잡는다. 180초는 로컬 28초의 약 6배인 **임시 여유값**이고, EKS 에서 첫 기동 시간을 재서 정한다. startup 이 성공하기 전에는 liveness 가 쉬므로, 로딩 중인 Pod 가 liveness 로 죽지 않는다 |
+| readinessProbe | `/readyz` | 5초 간격, 실패 3회 | 모델이 ready 일 때만 Service 에 들어온다. busy 는 반영하지 않는다(3.5) |
+| livenessProbe | `/healthz` | 10초 간격, 실패 3회 | 로딩 포기(`gave_up`) 뒤 503 이 되어 컨테이너가 재시작된다. 요청 스레드가 모두 막힌 경우도 `/healthz` 가 응답하지 못해 잡는다 |
+
+모델 로딩이 실패할 때의 흐름: 백그라운드 3회 시도(약 34초) → `/healthz` 503 → startup 이 아직 진행 중이면 liveness 는 쉬고 있어서 **startupProbe 가 180초에 실패해야 재시작**된다. 즉 로딩 실패의 재시작은 포기 시점(약 35초)이 아니라 startup 한도(180초) 근처에 일어난다. 포기 직후 바로 재시작하려면 startupProbe 를 `/healthz` 로 두는 대안이 있으나, 그러면 예외 없이 멈추는 로딩을 잡지 못한다. 두 대안 중 선택은 5-4 에서 하고, 선택 전에는 위 제안을 따른다.
+
+재시작 정책: `restartPolicy: Always`(기본)에서 컨테이너 재시작은 지수 백오프(CrashLoopBackOff, 최대 5분)로 늘어나므로 무한히 빠른 재시도는 없다. 재시작해도 같은 원인(모델 파일 없음 등)이면 계속 실패하니, 이 경우 알림(대시보드의 재시작 횟수)으로 사람이 알아야 한다. `terminationGracePeriodSeconds` 는 `graceful_timeout`(30초) 보다 커야 한다(5-4 에서 확인).
 
 ### 3.6 API 서버 동시성 [제안]
 
@@ -395,6 +409,12 @@ inference 단독, k6 closed-loop.
 | T3 | `AI_CLIENT_DEADLINE` | 계산값 | — | E0 p99 × (1 + T1 결과) + 1초, 올림 |
 | T4 (선택) | API 스레드 수 | 4, 8, 16 | S1 | T2 와 같은 규칙 |
 | **X1 (별도 구분)** | 상한 제거 (`MAX_CONCURRENCY` = 스레드 수, `MAX_WAITING` = 무제한) | — | S1 | 공식 구성이 아니다. "상한이 무엇을 막아 주는가" 를 보여 주는 대조 실험. 보고서에서 별도 절 |
+
+**E0/T1 에서 확인할 관찰 항목 (값은 지금 바꾸지 않는다)**
+
+- 대기 줄 끝 사진의 응답 시간이 API 마감에 얼마나 가까운가. 로컬 PC 에서 torch 스레드 1개일 때 동시 4장 중 대기 2장째 응답이 **9.85초**로 기본 마감(`AI_CLIENT_DEADLINE` 10초)에 근접했다. T3 식에 이 로컬 값(약 3.5초)을 넣으면 3.5 × (1 + 2) + 1 = 11.5초로 10초를 넘는다. 로컬 값은 결정 근거가 아니며, EKS 의 E0 p99 로 다시 계산한다.
+- 마감을 넘기는 사진이 실제로 생기는지(`pg_ai_client_requests_total{outcome="timeout"}`), 마감 직전에 끝난 사진이 API 쪽에서는 이미 포기되어 낭비되는 비율.
+- 스레드 수(E1)와 대기 상한(T1)이 서로 영향을 준다: 사진당 시간이 줄면 같은 대기 상한에서도 줄 끝 응답이 빨라진다.
 
 T1~T3 결과로 정한 값이 **Phase 1 공식 구성**이 되고, 그 값으로 S0~S5 를 실행한다. 선택 규칙에 맞는 후보가 없으면 그 사실을 기록하고 가장 가까운 후보를 쓴다.
 
@@ -907,7 +927,7 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | RDS 연결 수 | api 스레드 8 × Pod 4 + overflow 가 한도 초과 가능 | 단계 5 에서 `max_connections` 확인, 풀 크기 명시 |
 | m7i-flex 성능 변동 | 측정 흔들림 | steal 기록, 3회 반복, 같은 시간대 |
 | torch 스레드 안전성 미검증 | 락 제거 불가 | 락 유지, 동시성은 Pod 수로만 |
-| gunicorn graceful timeout 30초 vs grace 130초 | S5(c) 결과 왜곡 | 단계 2 에서 설정 명시 여부 결정 |
+| gunicorn graceful timeout 30초 vs grace 130초 | S5(c) 결과 왜곡 | **결정(2-6):** inference 는 `graceful_timeout = 30` 을 설정 파일에 명시(가장 긴 정상 요청은 (1 + 대기 2) × 수 초). API 는 Prototype 동작 유지를 위해 바꾸지 않는다(기본 30). `terminationGracePeriodSeconds` 와의 정합은 5-4 에서 맞춘다 |
 | **RDS 자동 재시작 (2026-11-04)** | 정지 7일 뒤 자동으로 켜져 과금 | 그 전에 재구축하거나 다시 정지 |
 | CI 순서 | ECR `inference` 가 없는데 CI 가 먼저 바뀌면 빌드 실패 | ECR 생성 뒤 CI 변경을 push |
 | 결과가 Phase 2 근거를 주지 않음 | 로드맵 변경 | 사전 등록 반대 결과 조항대로 |
@@ -942,8 +962,8 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 번호 | 작업 | 완료 기준 |
 |---|---|---|
 | 3-1 | Dockerfile 멀티 타깃. `api` 는 torch·YOLOv5·OpenCV 없음 | 두 이미지 빌드, `api` 이미지에서 `import torch` 실패 확인 |
-| 3-2 | docker-compose: inference(`/models` 마운트, 헬스체크), backend `INFERENCE_URL=http://inference:8000` | `docker compose up -d --build` 후 화면·API 정상 |
-| 3-3 | 측정: 이미지 크기, 유휴 RSS(`docker stats`), 첫 추론 시간, 사진 1장 왕복 시간 | `docs/measurements/phase1/local/` 기록 |
+| 3-2 | docker-compose: inference(`/models` 마운트, 헬스체크), backend `INFERENCE_URL=http://inference:8000` | `docker compose up -d --build` 후 화면·API 정상. **inference 는 Linux gunicorn(`gunicorn_inference.conf.py`)에서 실제 YOLO 모델로 실행한다 — 2-6 에서는 Windows 실제 모델과 Linux mock 을 따로 확인했으므로 이 조합은 3단계에서 반드시 검증한다** |
+| 3-3 | 측정: 이미지 크기, 유휴 RSS(`docker stats`), 첫 추론 시간, 사진 1장 왕복 시간. `scripts/check_inference_service.py` 와 같은 항목(판정 일치, 동시 4장, 모델 실패 경로, 스레드 1/2/4 의 CPU 사용 비율)을 컨테이너에서 다시 실행하고, **`OMP_NUM_THREADS` 가 torch import 전에 적용되었는지**(스레드 1일 때 CPU/벽시계 ≈ 1)와 torch 기본 스레드 수를 기록 | `docs/measurements/phase1/local/` 기록 |
 | 3-4 | 장애 확인: `docker compose stop inference` → 관리자 API 정상, 탐지 503. 지연 주입 → 마감 안에 503. 재시작 → 복구 | 결과 기록 |
 
 **4. 회귀 테스트와 PC 장비 시뮬레이터**

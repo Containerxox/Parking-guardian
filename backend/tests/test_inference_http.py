@@ -338,26 +338,29 @@ def test_bulkhead_refuses_instead_of_piling_up_api_threads():
     session = BlockingSession()
     client = HttpInference(BASE, session=session, max_concurrency=2)
     results = []
+    in_flight_before = counter("pg_ai_client_in_flight")  # a global gauge: compare the change, not the value
     threads = [threading.Thread(target=lambda: results.append(client.analyze(JPEG, "x.jpg"))) for _ in range(2)]
-    for t in threads:
-        t.start()
-    wait_until = time.time() + 5
-    while session.calls < 2 and time.time() < wait_until:
-        time.sleep(0.005)
-    before = counter("pg_ai_client_requests_total", outcome="bulkhead_full")
+    try:
+        for t in threads:
+            t.start()
+        wait_until = time.time() + 10
+        while session.calls < 2 and time.time() < wait_until:
+            time.sleep(0.005)
+        assert session.calls == 2
+        before = counter("pg_ai_client_requests_total", outcome="bulkhead_full")
 
-    with pytest.raises(InferenceError, match="too many"):
-        client.analyze(JPEG, "x.jpg")  # a 3rd call while 2 are in flight
+        with pytest.raises(InferenceError, match="too many"):
+            client.analyze(JPEG, "x.jpg")  # a 3rd call while 2 are in flight
 
-    assert session.calls == 2  # the refused photo was never sent
-    assert counter("pg_ai_client_requests_total", outcome="bulkhead_full") == before + 1
-    assert counter("pg_ai_client_in_flight") == 2
-
-    session.release.set()
-    for t in threads:
-        t.join(10)
+        assert session.calls == 2  # the refused photo was never sent
+        assert counter("pg_ai_client_requests_total", outcome="bulkhead_full") == before + 1
+        assert counter("pg_ai_client_in_flight") == in_flight_before + 2
+    finally:
+        session.release.set()  # always, so a failed assertion leaves no stuck threads behind
+        for t in threads:
+            t.join(10)
     assert len(results) == 2
-    assert counter("pg_ai_client_in_flight") == 0
+    assert counter("pg_ai_client_in_flight") == in_flight_before
     assert client.analyze(JPEG, "x.jpg").verdict == "violation"  # slots came back
 
 

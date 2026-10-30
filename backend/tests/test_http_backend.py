@@ -4,6 +4,7 @@ The point of the split is fault isolation (ADR 0018): when the inference service
 fail with the existing 503 inference_unavailable, while logins, lists and /readyz keep working. The Prototype
 backends (yolo, mock) keep their behaviour; the last tests pin that.
 """
+import io
 import logging
 import threading
 import time
@@ -11,6 +12,7 @@ import time
 import pytest
 import requests
 
+from app.cli import dev_api_key
 from app.adapters.inference import HttpInference, MockInference, YoloInference, build_inference
 from app.config import Config
 from inference_service import create_app as create_inference_app
@@ -19,6 +21,13 @@ from .conftest import API, JPEG_BYTES
 from .test_inference_http import BlockingSession, Canned, Clock, ScriptedSession
 
 AI_URL = "http://inference:8000"
+
+
+def upload_from(test_client, serial, filename):
+    """Like the `upload` fixture, but with the test client the caller passes (one per thread)."""
+    data = {"file": (io.BytesIO(JPEG_BYTES), filename)}
+    return test_client.post(f"{API}/device/detections", data=data, content_type="multipart/form-data",
+                            headers={"X-Device-Key": dev_api_key(serial)})
 
 
 def http_config(**overrides):
@@ -213,31 +222,43 @@ def test_a_permitted_car_stores_nothing_through_the_ai_service(client, auth, upl
 
 def test_with_the_ai_service_stuck_other_requests_are_not_starved(app, client, auth, upload):
     """Two photos wait inside the AI client (bulkhead 2). A third detection is refused at once, and the admin
-    API answers while the first two are still stuck. A larger limit than the thread count would not."""
+    API answers while the first two are still stuck. A larger limit than the thread count would not.
+
+    The stuck photos start one after the other, each with a test client of its own (a Flask test client is not
+    meant to be shared between threads, and the test database is one in-memory connection). The threads are
+    always released, even when an assertion fails, so a failure here cannot leak into other tests."""
     headers = auth("kim@a.com")  # log in before the threads are busy
     session = BlockingSession()
     app_client = switch_to_http(app, session, Clock(), AI_CLIENT_MAX_CONCURRENCY=2)
     app_client._clock, app_client._sleep = time.monotonic, time.sleep  # real time while threads block
+    answers = []
 
-    stuck = [threading.Thread(target=lambda: upload("RPI-A-GANGNAM-01", "violation.jpg")) for _ in range(2)]
-    for t in stuck:
-        t.start()
-    deadline = time.time() + 5
-    while session.calls < 2 and time.time() < deadline:
-        time.sleep(0.005)
-    assert session.calls == 2
+    def stuck_upload():
+        answers.append(upload_from(app.test_client(), "RPI-A-GANGNAM-01", "violation.jpg").status_code)
 
-    started = time.perf_counter()
-    refused = upload("RPI-A-GANGNAM-01", "violation.jpg")
-    admin = client.get(f"{API}/violations", headers=headers)
-    elapsed = time.perf_counter() - started
+    def wait_for_calls(n):
+        deadline = time.time() + 10
+        while session.calls < n and time.time() < deadline:
+            time.sleep(0.005)
+        assert session.calls == n, f"photo {n} never reached the AI client (answers so far: {answers})"
 
-    assert refused.status_code == 503
-    assert refused.get_json()["error"]["code"] == "inference_unavailable"
-    assert admin.status_code == 200
-    assert session.calls == 2  # the third photo never went out
-    assert elapsed < 2.0  # nobody waited for the stuck AI calls
+    stuck = [threading.Thread(target=stuck_upload) for _ in range(2)]
+    try:
+        for number, thread in enumerate(stuck, start=1):
+            thread.start()
+            wait_for_calls(number)
 
-    session.release.set()
-    for t in stuck:
-        t.join(10)
+        started = time.perf_counter()
+        refused = upload("RPI-A-GANGNAM-01", "violation.jpg")
+        admin = client.get(f"{API}/violations", headers=headers)
+        elapsed = time.perf_counter() - started
+
+        assert refused.status_code == 503
+        assert refused.get_json()["error"]["code"] == "inference_unavailable"
+        assert admin.status_code == 200
+        assert session.calls == 2  # the third photo never went out
+        assert elapsed < 2.0  # nobody waited for the stuck AI calls
+    finally:
+        session.release.set()
+        for thread in stuck:
+            thread.join(10)

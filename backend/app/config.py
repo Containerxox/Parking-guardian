@@ -107,6 +107,10 @@ class Config:
     WINDOW_CONF = float(os.environ.get("WINDOW_CONF", "0.25"))
     STICKER_CONF = float(os.environ.get("STICKER_CONF", "0.5"))
     INFERENCE_IMAGE_SIZE = int(os.environ.get("INFERENCE_IMAGE_SIZE", "640"))
+    # torch intra-op threads. 0 = leave the torch default (what the Prototype has always run with: the number of
+    # cores it sees). The inference service STARTS at 1 (wsgi_inference.py, inference_service/__init__.py): a
+    # starting value, not the operating value. E0/E1 on EKS decide it.
+    TORCH_NUM_THREADS = int(os.environ.get("TORCH_NUM_THREADS", "0"))
     # Inference service only. Photos allowed to wait behind the one being processed; one more is refused (503 busy).
     INFERENCE_MAX_WAITING = int(os.environ.get("INFERENCE_MAX_WAITING", "2"))
     # Test/drill only: extra milliseconds every photo spends inside the model slot. Keep 0 in production.

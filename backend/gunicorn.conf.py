@@ -11,10 +11,16 @@ def post_worker_init(worker):
     YoloInference.warm_up). The CLI (`flask db upgrade`, `flask seed`) never goes through gunicorn,
     so it never loads the models."""
     from app.adapters import warm_up_inference
+    from app.adapters.inference import report_bulkhead
     from app.metrics import start_metrics_server
 
     app = worker.app.wsgi()
     port = app.config.get("METRICS_PORT", 0)
     if port:
         start_metrics_server(port)  # /metrics on its own port, independent of the 4 request threads
-    warm_up_inference(app)
+    inference = app.extensions["pg_inference"]
+    if getattr(inference, "state", None) == "remote":
+        # INFERENCE_BACKEND=http: nothing to load here. Report the real worker/thread numbers gunicorn has.
+        report_bulkhead(inference, threads=worker.cfg.threads, workers=worker.cfg.workers)
+    else:
+        warm_up_inference(app)  # Prototype: load the models in the background

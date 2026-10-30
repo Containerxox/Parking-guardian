@@ -125,7 +125,8 @@ class YoloInference:
     name = "yolo"
 
     def __init__(self, yolov5_dir, window_model_path, sticker_model_path, window_class_name="car_window",
-                 window_conf=0.25, sticker_conf=0.25, image_size=640, load_attempts=3, retry_delay=5.0):
+                 window_conf=0.25, sticker_conf=0.25, image_size=640, load_attempts=3, retry_delay=5.0,
+                 torch_threads=0):
         self.yolov5_dir = str(yolov5_dir)
         self.window_model_path = str(window_model_path)
         self.sticker_model_path = str(sticker_model_path)
@@ -140,6 +141,7 @@ class YoloInference:
         self.load_attempts = max(1, int(load_attempts))
         self.retry_delay = retry_delay
         self.gave_up = False
+        self.torch_threads = int(torch_threads)  # 0 = leave the torch default
         self._lock = threading.Lock()
         self._window_model = None
         self._sticker_model = None
@@ -196,6 +198,7 @@ class YoloInference:
                 if sys.platform == "win32":
                     pathlib.PosixPath = pathlib.WindowsPath
 
+                self._apply_torch_threads(torch)
                 started = time.time()
                 window_model = torch.hub.load(self.yolov5_dir, "custom", path=self.window_model_path,
                                               source="local", verbose=False)
@@ -220,6 +223,11 @@ class YoloInference:
                 self._set_state("failed")
                 log.exception("model load failed")
                 raise InferenceError(f"model load failed: {exc}") from exc
+
+    def _apply_torch_threads(self, torch) -> None:
+        """Only reaches threads that start afterwards; wsgi_inference.py also sets OMP_NUM_THREADS for the rest."""
+        if self.torch_threads:
+            torch.set_num_threads(self.torch_threads)
 
     @staticmethod
     def _detect(model, image_bgr, size):
@@ -477,6 +485,17 @@ def _may_have_reached_the_service(exc) -> bool:
     return isinstance(cause, (urllib3.exceptions.ProtocolError, urllib3.exceptions.ReadTimeoutError))
 
 
+def report_bulkhead(client: HttpInference, threads: int, workers: int) -> None:
+    """Log how many AI calls can be in flight, from the worker/thread numbers gunicorn really runs with.
+    Each worker has its own bulkhead, so the total is workers x the limit."""
+    limit = client.max_concurrency
+    log.info("HttpInference: AI_CLIENT_MAX_CONCURRENCY=%d per worker, %d threads per worker, %d workers: "
+             "%d in total can be in flight", limit, threads, workers, limit * workers)
+    if limit >= threads:
+        log.warning("AI_CLIENT_MAX_CONCURRENCY=%d is not below the %d threads gunicorn runs: every thread of a "
+                    "worker can end up waiting for the inference service.", limit, threads)
+
+
 def _build_http_inference(config) -> HttpInference:
     url = config.get("INFERENCE_URL")
     if not url:
@@ -511,4 +530,5 @@ def build_inference(config) -> object:
         image_size=config["INFERENCE_IMAGE_SIZE"],
         load_attempts=config.get("MODEL_LOAD_ATTEMPTS", 3),
         retry_delay=config.get("MODEL_LOAD_RETRY_SECONDS", 5.0),
+        torch_threads=config.get("TORCH_NUM_THREADS", 0),
     )
