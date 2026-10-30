@@ -24,6 +24,17 @@
 
 Prototype 기존 57개는 Phase 1 작업 중 한 번도 수정하지 않았고 모두 통과한다 (Prototype 판정·응답 규칙 유지 확인).
 
+## 단계 2-7: SQLite · PostgreSQL 전체 실행 (2026-10-30, 커밋 `899a74f` 기준)
+
+| 데이터베이스 | 명령 | 결과 | 시간 |
+|---|---|---|---|
+| SQLite (메모리) | `python -m pytest tests -q` | **196 passed** | 약 20초 |
+| PostgreSQL 16 (compose `db`, `parking_guardian_test`) | `TEST_DATABASE_URL=postgresql+psycopg://…@127.0.0.1:5432/parking_guardian_test` 로 같은 명령, **2회** | **196 passed** (2회 모두) | 81초, 94초 |
+
+- 접속 대상은 pytest 헤더(`database: 127.0.0.1:5432/parking_guardian_test`)로 확인했다. 개발 DB(`parking_guardian`)는 건드리지 않았고(위반 8건 그대로), 테스트 DB 는 테스트 뒤 테이블이 0개다.
+- PostgreSQL 이 4배쯤 느린 것은 테스트마다 모든 테이블을 drop/create 하기 때문으로 보이나 원인을 따로 확인하지는 않았다.
+- 스레드를 쓰는 테스트(대기 상한, bulkhead, "AI 가 막혔을 때")도 PostgreSQL 에서 2회 통과했다. 인메모리 SQLite 연결 공유가 간헐 실패의 원인이라는 가설과 모순되지 않지만, 이것이 원인 확정은 아니다(아래).
+
 ## 테스트 안정성 (미해결 사항 유지)
 
 2-6 작업 중 전체 실행을 반복하다가 4번 중 2번 `test_http_backend.py::test_with_the_ai_service_stuck_other_requests_are_not_starved` 가 실패했고, 그 테스트가 스레드를 풀어 주지 않아 `test_inference_http.py::test_bulkhead_refuses_instead_of_piling_up_api_threads` 가 연쇄 실패했다(전역 게이트가 남아 `in_flight` 가 3).
