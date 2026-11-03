@@ -17,6 +17,13 @@ VehicleDetector) 이고, 상태 기계와 전송도 pi_client 의 것을 그대�
 는 실제 시간으로 계속 보내고(서버의 10분 끊김 판정 방지), Enter 를 누르면 타임라인의 다음 항목(빈 자리)으로 건너뛰어
 출차(left)를 보낸다. 컨테이너 서버(--server http://127.0.0.1:5000/api/v1)에 보내면 개발 DB 에 위반이 생긴다.
 
+Phase 2 비동기 프로토콜(ADR 0019)은 --protocol async 로 같은 타임라인을 돌린다: 사진은 로컬 Outbox 에 먼저 저장되고
+POST /device/detection-jobs 로 가며(202/200 = 접수), confirm 은 Heartbeat 응답의 명령으로 받는다. 서버는 QUEUE_BACKEND 가
+설정되어 있고 Worker(flask judge-worker)와 재전송기(flask outbox-relay)가 같은 큐를 쓰며 돌고 있어야 한다. 판정은 응답에
+없으므로 결과는 관리자 화면이나 DB 에서 본다. 서버가 판단하는 간격(confirm 60초)은 실제 시간이므로 의미 있는 확인은
+--speed 1 에서 한다 (배속이 크면 confirm 이 그만큼 일찍 나간다). 같은 프로토콜의 자동 검증은 서버 쪽
+backend/tests/test_async_device_integration.py 와 device/test_async_mode.py 에 있다.
+
     backend\\venv\\Scripts\\python device\\pc_event_test.py --server http://127.0.0.1:5000/api/v1 --interactive ^
         --timeline "backend/uploads/sample_f.jpg:60,backend/uploads/sample_e.jpg:700,backend/uploads/sample_f.jpg:90"
 """
@@ -32,7 +39,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pi_client import EventModeRunner, EventSettings, load_jpeg, send_heartbeat, send_photo  # noqa: E402
+from outbox import Outbox  # noqa: E402
+from pi_client import (AsyncEventRunner, EventModeRunner, EventSettings, load_jpeg, post_heartbeat, post_job,  # noqa: E402
+                       send_heartbeat, send_photo)
 from vehicle_detector import OccupancyConfig, VehicleDetector  # noqa: E402
 
 log = logging.getLogger("pc_event_test")
@@ -193,10 +202,18 @@ def main() -> int:
     parser.add_argument("--send-width", type=int, default=1280)
     parser.add_argument("--jpeg-quality", type=int, default=92)
     parser.add_argument("--out", help="결과 JSON 저장 경로")
+    parser.add_argument("--protocol", choices=("sync", "async"), default=os.environ.get("PG_PROTOCOL", "sync"),
+                        help="sync: POST /device/detections (Phase 1, 기본) | async: Outbox + /device/detection-jobs (Phase 2)")
+    parser.add_argument("--outbox-dir", help="async 의 Outbox 디렉터리. 기본은 이번 실행 전용 임시 폴더")
     parser.add_argument("--interactive", action="store_true",
                         help="위반이 확정되면(result=violation) 멈추고 Enter 를 기다린다. 기다리는 동안 Heartbeat 는 "
                              "실제 시간으로 계속 보낸다. Enter 를 누르면 타임라인의 다음 항목(빈 자리)으로 건너뛴다")
     args = parser.parse_args()
+    if args.protocol == "async" and args.interactive:
+        raise SystemExit("--interactive 는 sync 프로토콜의 즉시 판정(result=violation)에 의존합니다. async 와 함께 쓸 수 없습니다.")
+    if args.protocol == "async" and args.speed != 1:
+        print(f"주의: async 에서 서버가 정한 시간(confirm 60초 등)은 실제 시간입니다. --speed {args.speed:g} 에서는 "
+              "명령이 그만큼 일찍 실행됩니다. 프로토콜 확인은 되지만 간격 확인에는 --speed 1 을 쓰세요.")
 
     steps = parse_timeline(args.timeline)
     total = sum(s for _, s in steps)
@@ -251,7 +268,48 @@ def main() -> int:
     print(f"timeline {args.timeline} ({total:g}s) at {args.speed}x | model {args.model} imgsz {args.imgsz} | "
           f"ROI {OccupancyConfig.from_env().roi}")
     clock.start = time.monotonic()
-    runner = EventModeRunner(camera, detector, settings, photo, heartbeat, clock=clock, sleep=clock.sleep)
+    if args.protocol == "async":
+        import tempfile
+
+        outbox_dir = args.outbox_dir or tempfile.mkdtemp(prefix="pg_outbox_")
+        wall_start = time.time()
+        commands_seen: list[dict] = []
+
+        def job(item):
+            clock.pause()   # 서버 응답을 기다리는 동안 시뮬레이션 시계를 세운다 (sync 와 같다)
+            started = time.monotonic()
+            try:
+                outcome = post_job(args.server, args.key, item)
+            except OSError as exc:
+                events.append({"sim_s": round(clock(), 1), "event": item.event, "seq": item.seq,
+                               "event_id": item.event_id, "kind": "network_error", "error": type(exc).__name__})
+                print(f"  >>> {item.event:<8} seq={item.seq} -> 네트워크 오류 ({type(exc).__name__}). 같은 내용으로 다시 보냅니다")
+                raise
+            finally:
+                clock.resume()
+            events.append({"sim_s": round(clock(), 1), "image": os.path.basename(camera.current()), "event": item.event,
+                           "seq": item.seq, "session_id": item.session_id, "event_id": item.event_id,
+                           "command_id": item.command_id, "kb": len(item.jpeg) // 1024, "kind": outcome.kind,
+                           "http": outcome.status, "server_ms": int((time.monotonic() - started) * 1000)})
+            print(f"  >>> {item.event:<8} seq={item.seq} {events[-1]['image']:<14} -> {outcome.kind} (HTTP {outcome.status}"
+                  f"{', command ' + item.command_id[:8] if item.command_id else ''}, {events[-1]['server_ms']} ms)")
+            return outcome
+
+        def heartbeat_async(body):
+            response = post_heartbeat(args.server, args.key, body)
+            heartbeats.append(round(clock()))
+            for command in (response or {}).get("commands", []):
+                if command["command_id"] not in {c["command_id"] for c in commands_seen}:
+                    commands_seen.append(command)
+                    print(f"  <<< Heartbeat 명령 {command['type']} {command['command_id'][:8]} (due {command['due_at']})")
+            return response
+
+        runner = AsyncEventRunner(camera, detector, settings, outbox=Outbox(outbox_dir, clock=time.time),
+                                  send_job=job, send_heartbeat=heartbeat_async, clock=clock, sleep=clock.sleep,
+                                  wall=lambda: wall_start + clock())
+        print(f"async 프로토콜 | Outbox {outbox_dir}")
+    else:
+        runner = EventModeRunner(camera, detector, settings, photo, heartbeat, clock=clock, sleep=clock.sleep)
     while clock() < total:
         runner.step()
 
@@ -267,9 +325,22 @@ def main() -> int:
         "led_on_at_end": camera.led,
         "frame_rows": detector.rows,
     }
+    if args.protocol == "async":
+        summary.update({
+            "protocol": "async", "outbox_dir": outbox_dir, "outbox_pending": len(runner.outbox.items()),
+            "outbox_dead": [d.__dict__ for d in runner.outbox.dead_items()],
+            "commands_delivered": commands_seen, "acks_waiting": list(runner.acks),
+            "outbox_health": runner.health.snapshot(),   # also persisted in <outbox>/health.json
+        })
     print()
     print(f"frames {summary['frames']} (탐지 평균 {summary['detect_ms_mean']} ms) | 상태 변화 {transitions}")
-    print(f"events {[(e['sim_s'], e['event'], e['result']) for e in events]} | heartbeats {len(heartbeats)}")
+    if args.protocol == "async":
+        print(f"events {[(e['sim_s'], e['event'], e['kind']) for e in events]} | heartbeats {len(heartbeats)}")
+        print(f"Outbox 에 남은 것 {summary['outbox_pending']}건, 포기·보관 {len(summary['outbox_dead'])}건, "
+              f"받은 명령 {len(commands_seen)}개, 보낼 ack {len(runner.acks)}개")
+        print("판정과 위반은 응답에 없습니다. 관리자 화면 또는 DB(detection_jobs, device_commands)에서 확인하세요.")
+    else:
+        print(f"events {[(e['sim_s'], e['event'], e['result']) for e in events]} | heartbeats {len(heartbeats)}")
     if args.interactive:
         if any(e["episode_ended"] for e in events):
             print("사건이 종료되었습니다. 브라우저에서 위반 상세의 종료 이력(VEHICLE_LEFT)을 확인하세요.")

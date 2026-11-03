@@ -73,6 +73,43 @@ Pi 가 주차면 한 칸의 점유를 판정해서 **상황이 바뀔 때만** �
 
 **Pi 4 에서 아직 확인하지 못한 것**: lores 스트림의 YUV420 → BGR 변환(`Hardware.capture_frame`), 탐지 속도와 메모리, 빈 자리와 옆 칸 차량 판정, 야간. PC 에서 확인한 것(상태 기계, 서버 연동, 샘플 3장의 ROI 판정, NCNN 내보내기)과 Pi 에서만 확인할 수 있는 것의 구분은 `docs/measurements/PC_VERIFICATION.md`.
 
+## 비동기 프로토콜 (`PG_PROTOCOL=async`, Phase 2)
+
+위의 이벤트 모드와 **점유 판정·사진을 보내는 때는 같고 전송 방식만 다르다**. 기본값은 `sync`(지금까지의 방식, `POST /device/detections`)이고, 서버가 `QUEUE_BACKEND` 를 켜고 Worker 가 돌 때만 `async` 로 바꾼다(ADR 0019, 설계 6.10). 구현은 `pi_client.py` 의 `AsyncEventRunner` 와 `outbox.py` 다. 서버는 판정을 바로 돌려주지 않으므로 위반 확정·LED·confirm 이 Heartbeat 응답으로 온다.
+
+| 상황 | 장비가 하는 일 |
+|---|---|
+| 사진을 보낼 때 | 촬영 → **로컬 Outbox(디스크)에 먼저 저장** → 순서대로 `POST /device/detection-jobs`. 사진 원본 바이트와 `event_id`·`session_id`·`seq`·`event`·`command_id`·`detected_at` 는 몇 번을 재시도해도 같다 |
+| 202 | 접수됨. Outbox 에서 지운다 |
+| 200 (`duplicate`) | 이미 접수된 같은 `event_id` (응답이 유실된 뒤 재시도). 성공으로 보고 지운다 |
+| 네트워크 오류, 5xx, 429, 408, 425, 404 | 같은 내용으로 다시: full jitter 지수 백오프 `random(0, min(60초, 2초×2ⁿ))`, `Retry-After` 가 더 크면 그 값. 앞 항목이 기다리는 동안 뒤 항목은 보내지 않는다(순서) |
+| 400, 401, 403, 409, 413 등 | 다시 보내도 같으므로 재시도하지 않는다. 오류를 로그에 남기고 사진은 `outbox/dead/` 에 보관(사유 파일 포함, 최근 20건). 409 `command_conflict`(서버가 `command_id` 를 유효한 confirm 명령으로 인정하지 않음)도 여기에 해당한다 |
+| 오래된 것 | 촬영 뒤 `refresh`·`confirm` 10분, `arrived`·`left` 30분이 지나면 포기하고 `dead/` 로 |
+| 가득 참 (20건 / 50 MB) | 가장 오래된 `refresh` 만 `dead/` 로 옮겨 자리를 만든다. `arrived`·`confirm`·`left` 는 용량 때문에 지우지 않는다. refresh 로도 자리가 안 나면 **새 사진을 저장하지 못한 것으로 거절**한다: 오류 로그(유실), `store_failures` 증가, 순번·`photos_sent` 는 그대로, confirm 이면 실행한 것으로 기록하지도 ack 하지도 않는다(서버가 다시 보내 자리가 나면 실행). 기존 항목의 내용과 순서는 그대로 |
+| **열린 세션의 `left` 예약** | 점유 중인 동안 `left` 가 아닌 항목(`arrived`·`confirm`·`refresh`)은 **저장한 뒤에도 빈 칸 하나(와 사진 1장 분량 2 MB)가 남을 때만** 받는다. 그 칸은 그 세션의 `left` 몫이라 `left` 는 논리 한도 때문에 거절되지 않는다. 그래서 `arrived` 는 **두 칸**(자기 것과 `left` 것)이 비어 있어야 한다. 세션이 `left` 로 닫히면 예약이 풀린다. 이 규칙으로 `arrived` 가 거절될 수는 있다(그 차량의 감지는 다음 `refresh`, 최대 10분까지 늦어진다). 서버가 아는 세션의 `left` 를 잃는 것보다 낫다. 건수 한도가 2 보다 작으면 `arrived` 를 받을 수 없다 |
+| 저장 실패의 종류 | `full_items`·`full_bytes`(논리 한도, 정책 값) 와 `disk_full`·`disk_read_only`·`disk_error`(실제 디스크 문제) 를 구분해 센다. 앞은 한도 조정이나 단절 해소, 뒤는 디스크 정리·교체가 답이다. 예약은 실제 디스크 부족을 막지 못한다 |
+| `outbox/health.json` | 저장하지 못한 사진(종류별·이벤트별), **서버가 아는 세션의 `left` 를 저장하지 못한 횟수**(`left_of_known_session_refused`, 서버의 사건이 열린 채 남을 수 있는 가장 중요한 지표), 나이 때문에 포기한 항목 수(`given_up`), 마지막 실패를 원자적으로 기록한다. 재시작해도 남는다. "서버가 아는 세션"(`session_known`)은 **장비 로컬 기준**이다: 그 세션의 이벤트가 로컬 Outbox 에 한 번이라도 저장되었으면 True 이고, 서버 확인(ack)이 아니며 나중에 전송이 안 되거나 포기되어도 True 로 남는다. 서버가 모르는 세션의 `left` 실패는 경고로만 낮추고 `left_of_known_session_refused` 에서만 빼며 전체·`left` 이벤트별 실패 수에는 들어간다. 디스크가 가득 찬 바로 그 순간에는 이 파일도 못 쓸 수 있다: 그때는 메모리에 세고 다음 쓰기 때 함께 기록하며, 그 사이 프로세스가 죽으면 그 횟수는 사라진다 |
+| 프로세스 종료·재시작 | Outbox 파일을 이어서 같은 순서로 보낸다. 쓰다 만 파일(`.tmp`)과 깨진 파일은 보낼 것으로 읽히지 않고 `dead/` 로 간다 |
+| Heartbeat | 매분 `{session_id, occupied, last_seq, acked_commands}` 를 보낸다. 응답의 `violation_active` 로 LED 를 켜고 끈다 |
+| 응답에 `capture_confirm` 명령 | 아래 규칙대로 실행하거나 ack |
+
+**명령 처리와 ack 규칙** (실행한 명령이 취소되어 `fulfilled` 를 덮는 일이 없도록)
+
+1. 명령은 `command_id` 가 처음이고, 그 명령의 `session_id` 가 **지금 세션**이며, 지금 **점유 중**이고, **만료 전**일 때만 예약한다. 실행 시각은 `max(due_at, 받은 시각)`: `due_at − server_time` 만큼을 로컬 시간으로 옮겨 쓰므로 장비 시계가 틀려도 간격은 맞다.
+2. 실행하면 `command_id` 를 단 `confirm` 사진을 Outbox 에 넣고 `command_id` 를 `outbox/executed.json` 에 기록한다(최근 50개). 그 사진이 접수되면 서버가 명령을 `fulfilled` 로 바꾼다. 서버가 같은 명령을 계속 보내도(응답 유실, 재시작 뒤) **다시 찍지 않는다.**
+3. `acked_commands` 에는 **실행하지 않기로 한 명령만** 넣는다: 다른 세션, 만료, 출차(예약된 것 포함), 점유 아님, 알 수 없는 종류. 서버는 이를 `cancelled` 로 바꾼다.
+4. **이미 실행한(`executed.json` 에 있는) 명령은 어떤 이유로도 ack 하지 않는다.**
+5. Heartbeat 가 실패하면 ack 는 지우지 않고 다음 Heartbeat 에 다시 보낸다.
+
+| 환경변수 | 설명 | 기본값 |
+|---|---|---|
+| `PG_PROTOCOL` | `sync` \| `async` | `sync` |
+| `PG_OUTBOX_DIR` | 로컬 Outbox 디렉터리. SD 카드의 영구 위치에 둔다(재부팅 뒤에도 남아야 한다) | `~/.parking_guardian/outbox` |
+
+PC 에서는 `device/pc_event_test.py --protocol async` 로 같은 타임라인을 돌린다(아래 "PC에서 시험하기"). 자동 검증: `python -m pytest device/test_async_mode.py`(상태 기계·Outbox·명령 규칙), 서버와 맞물린 검증은 `backend/tests/test_async_device_integration.py`.
+
+**확인하지 못한 것**: 실제 Pi 의 SD 카드에서 쓰기 내구성과 전원 차단 시험, 느린 LTE 같은 실제 망에서의 지연, 서버와 별도 프로세스(Docker Compose)로 돌린 전체 경로(9단계).
+
 ## interval 모드 (`PG_MODE=interval`, 비교·측정용)
 
 지금까지의 방식이다. 차가 있든 없든 `PG_INTERVAL`(60초)마다 사진을 찍어 보내고 Heartbeat 는 보내지 않는다(사진이 "살아 있다"를 겸한다). 점유 판정과 차량 탐지 모델이 필요 없다. 이벤트 모드가 서버 부하를 얼마나 줄이는지 같은 코드로 재는 것이 목적이고(`backend/scripts/measure.py --mode interval`, 결과 `docs/measurements/README.md`), 실제 장비 운영에는 쓰지 않는다. 삭제하지 않고 유지한다.

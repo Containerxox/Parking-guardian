@@ -11,6 +11,7 @@ event (기본, 실제 운영 모드. AI_FINAL_DESIGN.md, docs/adr/0014): Pi 가 
       점유 -> 비점유 (6프레임 연속):  left 사진 전송 (빈 자리)
       비점유 중:                      60초마다 Heartbeat 만. 사진 없음
     전송에 실패하면 로그만 남긴다. 재시도 큐는 없다 (MVP). 주차 중이면 다음 refresh 때 사진이 다시 간다.
+    (PG_PROTOCOL=async 는 Phase 2: 로컬 Outbox 에 저장하고 같은 내용으로 재시도한다. AsyncEventRunner, outbox.py, 아래 설정 참고)
 
 interval (비교·성능 측정용 보조 모드, 지금까지의 방식): 1분마다 사진을 찍어 서버로 보낸다. 차가 없어도 보낸다.
 운영에는 쓰지 않고, 이벤트 모드와의 Before/After 비교(backend/scripts/measure.py, docs/measurements/)를 위해 남겨 둔다.
@@ -39,6 +40,10 @@ interval (비교·성능 측정용 보조 모드, 지금까지의 방식): 1분�
     PG_LED_PIN      (선택) LED 가 연결된 BCM 핀 번호. 기본 4
 
     PG_MODE               event | interval. 기본 event (interval 은 비교·측정용)
+    PG_PROTOCOL           (event) sync | async. 기본 sync (Phase 1: POST /device/detections, 판정을 응답으로 받음).
+                          async 는 Phase 2: Outbox 에 저장 후 POST /device/detection-jobs, confirm 은 Heartbeat 명령으로 받는다.
+                          서버가 QUEUE_BACKEND 를 켜고 Worker 가 돌 때만 쓴다.
+    PG_OUTBOX_DIR         (async) 로컬 Outbox 디렉터리. 기본 ~/.parking_guardian/outbox
     PG_DETECT_INTERVAL    (event) 점유 판정 프레임 간격(초). 기본 5
     PG_HEARTBEAT_INTERVAL (event) Heartbeat 간격(초). 기본 60
     PG_REFRESH_INTERVAL   (event) 주차 중 확인 사진 간격(초). 기본 600
@@ -57,15 +62,20 @@ from __future__ import annotations  # Raspberry Pi OS 의 Python 3.9 에서도 �
 import argparse
 import logging
 import os
+import random
 import signal
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # vehicle_detector 를 어디서 실행해도 찾도록
+
+from outbox import (ExecutedCommands, Outbox, OutboxFull, OutboxHealth, OutboxItem,  # noqa: E402
+                    classify_store_error)
 
 log = logging.getLogger("pi_client")
 
@@ -259,6 +269,87 @@ def send_heartbeat(server_url: str, device_key: str) -> bool:
     return True
 
 
+# --- Phase 2 비동기 프로토콜 (ADR 0019, 설계 6.10). PG_PROTOCOL=async 일 때만 쓴다. 기본(sync)은 위의 Phase 1 그대로 ---
+
+RETRYABLE_STATUS = (404, 408, 425, 429)   # 404: 서버에 아직 비동기 접수가 켜져 있지 않음(QUEUE_BACKEND=none). 사진은 지키고 기다린다
+MIN_RETRY_DELAY = 0.5                     # full jitter 가 0 에 가까워도 바쁜 반복이 되지 않도록
+MAX_BACKOFF = 60.0
+GIVE_UP_AFTER = {"arrived": 1800.0, "left": 1800.0, "refresh": 600.0, "confirm": 600.0}   # 설계 6.10: 촬영 뒤 초
+
+
+@dataclass
+class SendOutcome:
+    """접수 요청 한 번의 결과.  accepted(202) | duplicate(200) 는 성공, retry 는 같은 내용으로 다시, drop 은 포기."""
+
+    kind: str
+    status: int | None = None
+    retry_after: float | None = None
+    detail: str = ""
+
+
+def classify_job_response(status: int, body, retry_after=None) -> SendOutcome:
+    """POST /device/detection-jobs 응답을 해석한다 (docs/design/API.md).
+
+    202 새로 접수, 200 같은 event_id 가 이미 접수됨(응답 유실 뒤 재시도) -> 둘 다 성공.
+    네트워크 오류·5xx·429·408·425·404 는 재시도, 그 밖의 4xx(400, 401, 403, 409, 413 ...)는 다시 보내도 같으므로 포기."""
+    code = ""
+    if isinstance(body, dict):
+        error = body.get("error")
+        code = str(error.get("code", "")) if isinstance(error, dict) else ""
+    if status == 202:
+        return SendOutcome("accepted", status)
+    if status == 200:
+        return SendOutcome("duplicate", status)
+    delay = None
+    try:
+        delay = float(retry_after) if retry_after is not None else None
+    except (TypeError, ValueError):
+        delay = None   # HTTP 날짜 형식 등은 무시하고 백오프를 쓴다
+    if status >= 500 or status in RETRYABLE_STATUS:
+        return SendOutcome("retry", status, retry_after=delay, detail=code)
+    return SendOutcome("drop", status, detail=code)
+
+
+def post_job(server_url: str, device_key: str, item, timeout=(5, 60)) -> SendOutcome:
+    """Outbox 항목 하나를 보낸다. 네트워크 오류(requests.RequestException)는 그대로 올려 보내며 호출한 쪽이 재시도한다."""
+    form = {k: str(v) for k, v in item.metadata().items() if v is not None}
+    response = requests.post(f"{server_url.rstrip('/')}/device/detection-jobs", headers={"X-Device-Key": device_key},
+                             files={"file": (f"{item.event_id}.jpg", item.jpeg, "image/jpeg")}, data=form,
+                             timeout=timeout)
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    return classify_job_response(response.status_code, body, response.headers.get("Retry-After"))
+
+
+def post_heartbeat(server_url: str, device_key: str, body: dict) -> dict | None:
+    """Phase 2 Heartbeat: session_id, occupied, last_seq, acked_commands 를 보내고 응답 JSON 을 돌려준다.
+    실패하면 None (다음 주기가 곧 재시도다. ack 는 성공할 때까지 계속 보낸다)."""
+    try:
+        response = requests.post(f"{server_url.rstrip('/')}/device/heartbeat", json=body,
+                                 headers={"X-Device-Key": device_key}, timeout=(5, 15))
+    except requests.RequestException as exc:
+        log.warning("Heartbeat 전송 실패: %s", exc)
+        return None
+    if response.status_code != 200:
+        log.warning("Heartbeat 서버 오류(%s)", response.status_code)
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        log.warning("Heartbeat 응답을 해석할 수 없습니다: %s", response.text[:200])
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_protocol(env=os.environ) -> str:
+    value = (env.get("PG_PROTOCOL") or "sync").strip().lower()
+    if value not in ("sync", "async"):
+        raise SystemExit(f"PG_PROTOCOL 은 sync 또는 async 입니다: {value!r}")
+    return value
+
+
 @dataclass
 class EventSettings:
     """이벤트 모드의 시간 설정(초). 전부 환경변수로 바꿀 수 있다."""
@@ -381,6 +472,284 @@ class EventModeRunner:
         self.camera.set_led(result in VIOLATION_RESULTS)
 
 
+class AsyncEventRunner(EventModeRunner):
+    """Phase 2 비동기 프로토콜 상태 기계 (ADR 0019 결정 8·9, 설계 6.9·6.10). EventModeRunner 와 점유 판정·전송 시점은 같고
+    전송 방식만 다르다: 서버는 판정을 바로 돌려주지 않으므로 응답으로 confirm 을 예약하지 않는다.
+
+    사진 전송: 촬영 -> Outbox(디스크)에 먼저 저장 -> 순서대로 전송. Outbox 가 가득 차면 오래된 refresh 만 정리하고, 그래도
+    자리가 없으면 새 사진을 저장 실패로 거절한다(_send 가 False, store_failures + 1, 오류 로그. 기존 항목은 그대로).
+    같은 event_id·session_id·seq·event·command_id·사진으로만 재시도한다. 202·200 은 성공, 네트워크 오류·5xx·429 는 full jitter 백오프(최대 60초, Retry-After 존중), 409 등은 포기하고
+    dead 에 보관한다. 앞 항목이 막히면 뒤 항목은 기다린다(순서). 오래되면 포기한다(refresh·confirm 10분, arrived·left 30분).
+
+    Heartbeat: {session_id, occupied, last_seq, acked_commands} 를 보내고 응답의 commands 를 해석한다.
+      - confirm 명령은 command_id 가 새롭고 지금 세션·점유 상태이며 만료 전일 때만 실행한다. 실행 시각은
+        max(due_at, 받은 시각): 서버 시계와의 차이는 (due_at - server_time) 로 로컬 시간으로 옮긴다.
+      - 실행하면 command_id 를 단 confirm 사진을 Outbox 에 넣고 command_id 를 파일에 기록한다. 이 사진이 접수되면 서버가
+        명령을 fulfilled 로 바꾼다. 같은 명령이 또 와도(응답 유실, 재시작 뒤) 다시 찍지 않는다.
+      - ack(acked_commands) 는 "이 명령은 실행하지 않는다" 일 때만 보낸다: 다른 세션, 만료, 출차, 점유 아님, 알 수 없는 종류.
+        이미 실행한 명령은 절대 ack 하지 않는다 (서버가 cancelled 로 바꿔 fulfilled 를 덮지 못하도록).
+        Heartbeat 가 성공하기 전까지 ack 는 계속 보낸다.
+      - violation_active 로 LED 를 켜고 끈다 (응답에 판정이 없으므로).
+
+    camera / detector / clock / sleep 은 EventModeRunner 와 같다. wall 은 벽시계(초), rng 는 백오프 지터다(테스트용 주입).
+    """
+
+    def __init__(self, camera, detector, settings: EventSettings, outbox, send_job, send_heartbeat,
+                 clock=time.monotonic, sleep=time.sleep, wall=time.time, rng=random.random, health=None):
+        super().__init__(camera, detector, settings, send_photo=None, send_heartbeat=send_heartbeat,
+                         clock=clock, sleep=sleep)
+        self.outbox = outbox
+        self.send_job = send_job
+        self.wall = wall
+        self.rng = rng
+        self.executed = ExecutedCommands(outbox.root / "executed.json")
+        self.session_id: str | None = None
+        self.seq = 0
+        self.pending_confirms: dict[str, tuple[float, float, str]] = {}   # command_id -> (실행 시각, 만료 시각, 세션)
+        self.acks: list[str] = []                                          # 보낼 ack (성공할 때까지 유지, 순서 유지)
+        self._retry: dict[str, tuple[int, float]] = {}                    # event_id -> (실패 횟수, 다음 시도 시각)
+        self.store_failures = 0                                            # 이 프로세스에서 저장하지 못한 사진 수 (유실 건수)
+        self.store_failures_full = 0                                       # 그중 논리 한도(건수·바이트) 때문
+        self.store_failures_disk = 0                                       # 그중 실제 디스크 오류 때문
+        self.last_store_error: str | None = None
+        # session_known: 장비 로컬 기준이다. "지금 세션의 이벤트가 하나라도 로컬 Outbox 에 저장된 적이 있다" 일 뿐, 서버가 받았다는
+        # 확인(ack)이 아니다. 저장한 뒤 전송이 한 번도 되지 않았거나 나이로 포기(given_up)되어도 True 로 남는다(세션이 바뀔 때까지).
+        # 그래서 "서버가 이 세션을 알고 있을 수 있다" 쪽으로 기운 보수적 판단이다. 서버의 확인이 필요한 판단에는 쓰지 않는다.
+        self.session_known = False
+        self.health = health or OutboxHealth(outbox.root / "health.json", clock=wall)   # 재시작해도 남는 기록
+
+    # --- 한 단계 ------------------------------------------------------------------------------------------
+
+    def step(self) -> None:
+        now = self.clock()
+        s = self.settings
+
+        if now >= self.next_heartbeat:
+            self._heartbeat()
+            self.next_heartbeat = now + s.heartbeat_interval
+
+        self._run_due_confirms()
+
+        if self.occupied and self.refresh_due is not None and now >= self.refresh_due:
+            self.refresh_due = now + s.refresh_interval
+            self._send("refresh")
+
+        self._flush()
+
+        if now >= self.next_frame:
+            self.next_frame = now + s.detect_interval
+            self.detector.process_frame(self.camera.capture_frame())
+            state = self.detector.tracker.state
+            if state is not None and state != self.occupied:
+                self._occupancy_changed(state, now)
+
+        due = [self.next_frame, self.next_heartbeat] + [d for d, _, _ in self.pending_confirms.values()]
+        if self.occupied and self.refresh_due is not None:
+            due.append(self.refresh_due)
+        retry_at = self._next_retry()
+        if retry_at is not None:
+            due.append(retry_at)
+        wait = min(due) - self.clock()
+        if wait > 0:
+            self.sleep(wait)
+
+    def _occupancy_changed(self, occupied: bool, now: float) -> None:
+        was_booting = self.occupied is None
+        self.occupied = occupied
+        if occupied:
+            log.info("차량 진입 확정 -> arrived 사진")
+            self.refresh_due = now + self.settings.refresh_interval
+            self._send("arrived")
+        else:
+            self.refresh_due = None
+            self._cancel_pending_confirms("차량이 나갔습니다")
+            if was_booting:
+                log.info("부팅 직후 빈 자리. 사진 없이 Heartbeat 만 보낸다.")
+            else:
+                log.info("차량 출차 확정 -> left 사진")
+                self._send("left")
+
+    # --- 촬영 -> Outbox ------------------------------------------------------------------------------------
+
+    def _send(self, event: str, command_id: str | None = None) -> bool:
+        """촬영해서 Outbox 에 넣고 전송을 시도한다. Outbox 에 들어갔으면 True (전송 성공과는 별개)."""
+        try:
+            jpeg = self.camera.capture()
+        except Exception:
+            log.exception("촬영에 실패했습니다 (event=%s).", event)
+            return False
+        if event == "arrived":
+            self._cancel_pending_confirms("새 세션이 시작되었습니다")
+            self.session_id, self.seq = str(uuid.uuid4()), 0
+            self.session_known = False
+        elif self.session_id is None:
+            log.warning("진행 중인 세션이 없어 %s 사진을 보내지 않습니다.", event)
+            return False
+        self.seq += 1
+        item = OutboxItem.new(self.session_id, self.seq, event, jpeg, self.wall, command_id)
+        try:
+            # `left` 만 열린 세션의 예약 칸을 쓴다. 나머지(arrived·confirm·refresh)는 저장한 뒤에도 그 칸이 남아야 받는다.
+            self.outbox.put(item, reserve_for_left=(event != "left"))
+        except (OutboxFull, OSError) as exc:
+            # 저장하지 못한 사진은 저장된 것도, 보낸 것도 아니다: 순번을 쓰지 않고, 명령을 실행한 것으로 기록하지 않고,
+            # photos_sent 도 올리지 않는다. 같은 일이 계속되면 사진이 유실되므로 눈에 띄게 오류로 남기고
+            # (논리 한도인지 실제 디스크 문제인지 구분해) health.json 에 영속적으로 센다.
+            self.seq -= 1
+            kind = classify_store_error(exc)
+            self.store_failures += 1
+            if kind.startswith("full_"):
+                self.store_failures_full += 1
+            else:
+                self.store_failures_disk += 1
+            self.last_store_error = f"{event}: {kind}: {exc}"
+            left_of_known_session = event == "left" and self.session_known
+            if left_of_known_session:
+                log.error("left 사진을 Outbox 에 저장하지 못했습니다(%s). 서버가 이 세션을 알고 있어 출차가 전해지지 않으면 "
+                          "서버의 사건이 열린 채 남을 수 있습니다: %s", kind, exc)
+            elif event == "left":
+                log.warning("left 사진을 Outbox 에 저장하지 못했습니다(%s). 이 세션의 이벤트는 서버에 간 적이 없어 닫을 사건은 "
+                            "없습니다: %s", kind, exc)
+            else:
+                log.error("%s 사진을 Outbox 에 저장하지 못했습니다(%s). 이 사진은 서버로 보내지지 않습니다 (유실): %s",
+                          event, kind, exc)
+            self.health.record_failure(event, self.seq + 1, kind, str(exc), left_of_known_session)
+            return False
+        self.session_known = True
+        if command_id:
+            self.executed.add(command_id)   # 사진이 디스크에 있다 = 실행했다. 재시작해도 다시 찍지 않는다
+        self._flush()
+        return True
+
+    # --- 전송 ---------------------------------------------------------------------------------------------
+
+    def _flush(self) -> None:
+        wall = self.wall()
+        items = self.outbox.items()
+        for item in items:   # 막힌 항목 뒤에 있어도 오래되면 포기한다
+            limit = GIVE_UP_AFTER.get(item.event, 600.0)
+            if wall - item.created > limit:
+                log.warning("%s 사진(seq %s)을 %d분 안에 보내지 못해 포기합니다.", item.event, item.seq, limit // 60)
+                self.outbox.discard(item, f"gave up after {int(limit // 60)} min")
+                self.health.record_given_up(item.event)
+                self._retry.pop(item.event_id, None)
+        now = self.clock()
+        for item in self.outbox.items():
+            state = self._retry.get(item.event_id)
+            if state is not None and state[1] > now:
+                break   # 앞 항목이 아직 기다리는 중: 뒤 항목이 앞지르지 않는다
+            try:
+                outcome = self.send_job(item)
+            except OSError as exc:
+                log.warning("%s 사진 전송 실패, 다시 시도합니다: %s", item.event, exc)
+                self._backoff(item, None)
+                break
+            if outcome.kind in ("accepted", "duplicate"):
+                self.outbox.remove(item)
+                self._retry.pop(item.event_id, None)
+                self.photos_sent += 1
+                log.info("%s 접수됨 (seq %s, HTTP %s%s)", item.event, item.seq, outcome.status,
+                         ", 이미 접수된 요청" if outcome.kind == "duplicate" else "")
+            elif outcome.kind == "drop":
+                reason = f"{outcome.status} {outcome.detail}".strip()
+                log.error("서버가 %s 사진(seq %s)을 거부했습니다 (%s). 다시 보내지 않고 보관합니다.", item.event, item.seq, reason)
+                self.outbox.discard(item, reason)
+                self._retry.pop(item.event_id, None)
+            else:
+                log.warning("서버가 %s 사진을 받지 못했습니다 (HTTP %s). 다시 시도합니다.", item.event, outcome.status)
+                self._backoff(item, outcome.retry_after)
+                break
+
+    def _backoff(self, item, retry_after: float | None) -> None:
+        failures = self._retry.get(item.event_id, (0, 0.0))[0] + 1
+        wait = self.rng() * min(MAX_BACKOFF, 2.0 * 2 ** failures)   # full jitter
+        wait = max(wait, retry_after or 0.0, MIN_RETRY_DELAY)
+        self._retry[item.event_id] = (failures, self.clock() + wait)
+
+    def _next_retry(self) -> float | None:
+        items = self.outbox.items()
+        if not items:
+            return None
+        state = self._retry.get(items[0].event_id)
+        return state[1] if state is not None else self.clock()
+
+    # --- Heartbeat 와 명령 ----------------------------------------------------------------------------------
+
+    def _heartbeat(self) -> None:
+        body = {"session_id": self.session_id, "occupied": self.occupied, "last_seq": self.seq,
+                "acked_commands": list(self.acks)}
+        try:
+            response = self.send_heartbeat(body)
+        except OSError as exc:
+            log.warning("Heartbeat 전송 실패: %s", exc)
+            response = None
+        if response is None:
+            return   # ack 는 그대로 남아 다음 Heartbeat 에 다시 간다
+        self.acks = [c for c in self.acks if c not in body["acked_commands"]]
+        if "violation_active" in response:
+            self.camera.set_led(bool(response["violation_active"]))
+        self._apply_commands(response)
+
+    @staticmethod
+    def _parse_time(value):
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _apply_commands(self, response: dict) -> None:
+        commands = response.get("commands") or []
+        server_time = self._parse_time(response.get("server_time"))
+        now = self.clock()
+        for command in commands:
+            command_id = str(command.get("command_id", ""))
+            if not command_id or command_id in self.executed or command_id in self.pending_confirms:
+                continue   # 이미 실행했거나 예약했다: 다시 찍지 않고, 실행한 명령은 ack 하지 않는다
+            if command.get("type") != "capture_confirm":
+                log.warning("알 수 없는 명령 종류 %r: 실행하지 않습니다.", command.get("type"))
+                self._ack(command_id)
+                continue
+            if str(command.get("session_id")) != self.session_id or not self.occupied:
+                log.info("명령 %s 는 지금 세션·점유 상태와 맞지 않아 실행하지 않습니다.", command_id)
+                self._ack(command_id)
+                continue
+            due_at, expires_at = self._parse_time(command.get("due_at")), self._parse_time(command.get("expires_at"))
+            if server_time is None or due_at is None or expires_at is None:
+                log.warning("명령 %s 의 시각을 해석할 수 없어 바로 실행합니다.", command_id)
+                self.pending_confirms[command_id] = (now, now + 540.0, self.session_id)
+                continue
+            # 서버 시계를 로컬 시간으로 옮긴다: 로컬 시각 = 로컬 now + (명령 시각 - 서버 now). 장비 시계가 틀려도 간격은 맞다
+            due = now + max(0.0, (due_at - server_time).total_seconds())
+            expires = now + (expires_at - server_time).total_seconds()
+            if expires <= now:
+                log.info("명령 %s 는 이미 만료되어 실행하지 않습니다.", command_id)
+                self._ack(command_id)
+                continue
+            self.pending_confirms[command_id] = (due, expires, self.session_id)
+
+    def _ack(self, command_id: str) -> None:
+        if command_id not in self.executed and command_id not in self.acks:
+            self.acks.append(command_id)
+
+    def _cancel_pending_confirms(self, why: str) -> None:
+        for command_id in list(self.pending_confirms):
+            log.info("예약된 confirm 명령 %s 를 취소합니다: %s", command_id, why)
+            del self.pending_confirms[command_id]
+            self._ack(command_id)
+
+    def _run_due_confirms(self) -> None:
+        now = self.clock()
+        for command_id, (due, expires, session) in sorted(self.pending_confirms.items(), key=lambda kv: kv[1][0]):
+            if now < due:
+                continue
+            del self.pending_confirms[command_id]
+            if not self.occupied or session != self.session_id or now >= expires:
+                log.info("명령 %s 를 실행하지 않습니다 (세션 변경, 출차 또는 만료).", command_id)
+                self._ack(command_id)
+                continue
+            log.info("서버 명령에 따라 confirm 사진 (command %s)", command_id)
+            self._send("confirm", command_id=command_id)
+
+
 class DeviceCamera:
     """EventModeRunner 가 쓰는 카메라 어댑터: Hardware/FakeHardware 와 전송 설정을 묶는다."""
 
@@ -410,10 +779,20 @@ def run_event_mode(hardware, args, limit: int) -> None:
                                imgsz=int(os.environ.get("PG_DETECTOR_IMGSZ", "480")),
                                config=OccupancyConfig.from_env())
     camera = DeviceCamera(hardware, args.send_width, args.jpeg_quality)
-    runner = EventModeRunner(
-        camera, detector, settings,
-        send_photo=lambda jpeg, event: send_photo(args.server, args.key, jpeg, args.zone, event=event),
-        send_heartbeat=lambda: send_heartbeat(args.server, args.key))
+    protocol = parse_protocol()
+    if protocol == "async":
+        outbox_dir = os.environ.get("PG_OUTBOX_DIR") or os.path.join(os.path.expanduser("~"), ".parking_guardian",
+                                                                      "outbox")
+        runner = AsyncEventRunner(
+            camera, detector, settings, outbox=Outbox(outbox_dir, clock=time.time),
+            send_job=lambda item: post_job(args.server, args.key, item),
+            send_heartbeat=lambda body: post_heartbeat(args.server, args.key, body))
+        log.info("비동기 프로토콜(Phase 2) | Outbox %s | 대기 중 %d건", outbox_dir, len(runner.outbox.items()))
+    else:
+        runner = EventModeRunner(
+            camera, detector, settings,
+            send_photo=lambda jpeg, event: send_photo(args.server, args.key, jpeg, args.zone, event=event),
+            send_heartbeat=lambda: send_heartbeat(args.server, args.key))
     log.info("이벤트 모드 | 프레임 %.1f초 | Heartbeat %.0f초 | refresh %.0f초 | confirm %.0f초 | ROI %s",
              settings.detect_interval, settings.heartbeat_interval, settings.refresh_interval,
              settings.confirm_delay, detector.config.roi)
