@@ -31,7 +31,8 @@ if (VIOLATION_RATIO > 0 && env('ALLOW_VIOLATIONS', '') !== '1') {
 }
 const BASE = required('BASE_URL').replace(/\/$/, '');
 const API = `${BASE}/api/v1`;
-const KEYS = required('DEVICE_KEYS').split(',').map((k) => k.trim()).filter(Boolean);
+// S0 은 사진을 보내지 않으므로 장비 키가 필요 없고, 장비에 아무것도(Heartbeat 포함) 보내지 않는다.
+const KEYS = SCENARIO === 'S0' ? [] : required('DEVICE_KEYS').split(',').map((k) => k.trim()).filter(Boolean);
 const ADMIN_EMAIL = required('ADMIN_EMAIL');
 const ADMIN_PASSWORD = required('ADMIN_PASSWORD');
 
@@ -208,7 +209,7 @@ export function setup() {
   const ready = http.get(`${API}/readyz`, { tags: { phase: 'warmup' } });
   if (ready.status !== 200) throw new Error(`readyz 가 ${ready.status} 입니다. 서버가 준비되지 않았습니다.`);
   if (!login()) throw new Error('관리자 로그인에 실패했습니다 (ADMIN_EMAIL / ADMIN_PASSWORD 확인).');
-  for (const key of KEYS) {
+  for (const key of KEYS) { // S0 에서는 KEYS 가 비어 장비에 아무것도 보내지 않는다
     const hb = http.post(`${API}/device/heartbeat`, null, { headers: { 'X-Device-Key': key }, tags: { phase: 'warmup' } });
     if (hb.status !== 200) throw new Error(`장비 키 하나가 거절되었습니다 (heartbeat ${hb.status}). DEVICE_KEYS 확인.`);
   }
