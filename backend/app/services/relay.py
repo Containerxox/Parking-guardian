@@ -28,6 +28,8 @@ The database is the source of truth; the queue only carries jobs. The relay repa
 """
 import hashlib
 import logging
+import threading
+import time
 from datetime import datetime, timedelta
 
 from flask import current_app
@@ -81,9 +83,11 @@ def _record_send_failure(job: DetectionJob, error: QueueError, now: datetime) ->
 
 
 class OutboxRelay:
-    def __init__(self, clock=utcnow, batch_size: int = 50, stalled_after: timedelta | None = None):
+    def __init__(self, clock=utcnow, batch_size: int = 50, stalled_after: timedelta | None = None,
+                 stop: threading.Event | None = None):
         self.clock = clock
         self.batch_size = batch_size
+        self._stop = stop      # set by SIGTERM/SIGINT (cli.install_stop_handlers); checked between steps, never in the middle of one
         if stalled_after is None:
             seconds = current_app.config.get("RELAY_STALLED_AFTER_SECONDS")
             stalled_after = timedelta(seconds=seconds) if seconds else STALLED_AFTER
@@ -92,10 +96,36 @@ class OutboxRelay:
                              f"{DEDUPLICATION_WINDOW} plus margin): a requeue inside it would be dropped")
         self.stalled_after = stalled_after
 
+    def _stopping(self) -> bool:
+        return self._stop is not None and self._stop.is_set()
+
+    def run_loop(self, interval: float = 2.0, clean_every: int = 1800) -> int:
+        """Passes until a stop is requested (SIGTERM/SIGINT). The sleep between passes ends the moment the stop is set. Returns the pass count.
+        Every step of a pass commits on its own and is idempotent, so stopping between steps (or being killed anywhere) loses nothing:
+        the next relay repeats what is left."""
+        passes = 0
+        while not self._stopping():
+            self.run_once(clean=bool(clean_every) and passes % clean_every == 0)
+            passes += 1
+            if self._stop is not None:
+                self._stop.wait(interval)
+            else:
+                time.sleep(interval)
+        return passes
+
     def run_once(self, clean: bool = False) -> dict:
-        stats = {"recovery": self.recover_stalled()}          # first: a requeued job is published in this same pass
-        stats.update({"published": self.publish_pending(), "dead_letters": self.sweep_dead_letters(),
-                      "effects_retried": self.retry_effects()})
+        stats = {"stopped": False, "recovery": {"requeued": 0, "rejected": 0, "storage_errors": 0}, "published": 0,
+                 "dead_letters": {"dead_lettered": 0, "already_finished": 0, "kept": 0, "busy": 0}, "effects_retried": 0}
+        # recovery first: a requeued job is published in this same pass. A stop is honoured between the steps.
+        for key, step in (("recovery", self.recover_stalled), ("published", self.publish_pending),
+                          ("dead_letters", self.sweep_dead_letters), ("effects_retried", self.retry_effects)):
+            if self._stopping():
+                stats["stopped"] = True
+                return stats
+            stats[key] = step()
+        if self._stopping():
+            stats["stopped"] = True
+            return stats
         stats["oldest_pending_publish_seconds"] = self._report_old_pending()
         stats["stalled_jobs"], stats["oldest_open_job_age_seconds"] = self._report_open_jobs()
         if clean:
@@ -113,6 +143,8 @@ class OutboxRelay:
         db.session.rollback()
         sent = 0
         for machine_id in machine_ids:
+            if self._stopping():
+                break
             sent += self._publish_machine(machine_id, now)
         return sent
 
@@ -134,7 +166,7 @@ class OutboxRelay:
         sent = 0
         for job_id in everything:
             job = locked.get(job_id)
-            if job is None or as_utc(job.next_publish_at) > now:
+            if job is None or as_utc(job.next_publish_at) > now or self._stopping():
                 break
             try:
                 queue.send(job.id, job.machine_id)
@@ -212,6 +244,8 @@ class OutboxRelay:
                                         .limit(self.batch_size)).all()
         db.session.rollback()
         for job_id, s3_key, status in candidates:
+            if self._stopping():
+                break
             try:
                 present = adapters.storage().exists(s3_key)
             except Exception as exc:
@@ -261,6 +295,8 @@ class OutboxRelay:
             log.warning("cannot read the DLQ: %s", exc)
             return stats
         for message in messages:
+            if self._stopping():
+                break      # the rest become visible again after the DLQ visibility timeout and are swept by the next relay
             stats[self._handle_dead_letter(queue, message)] += 1
         return stats
 
@@ -324,6 +360,8 @@ class OutboxRelay:
         worker = JudgementWorker(worker_id="relay", clock=self.clock)
         retried = 0
         for job_id in candidates:
+            if self._stopping():
+                break
             won = db.session.execute(update(DetectionJob).where(
                 DetectionJob.id == job_id, DetectionJob.effects_status == EffectsStatus.PENDING,
                 DetectionJob.updated_at <= due).values(updated_at=now)

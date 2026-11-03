@@ -19,6 +19,12 @@ For one queue message:
      that part; 'failed' after 3 failed attempts. Idempotent, never touches the episode.
   6. Delete the message. A failed delete is only logged: the redelivered message finds the job finished.
 
+Life cycle (P4/P5, 2026-11-03): serve() loads the models and runs both once BEFORE its first receive (a failed load raises and
+consumes nothing). request_stop() (SIGTERM/SIGINT via cli.install_stop_handlers) means: no new work. The message being judged is
+finished through step 6; a message that the long poll still returns after the stop is given back at once (visibility 0, it costs one
+receive of maxReceiveCount 3) without a claim. If the grace period runs out first (SIGKILL), steps 2-4 make it safe: the lease (55 s)
+ends, the message returns after the 60 s visibility timeout, another worker claims, claim_attempt fencing drops the dead one's result.
+
 Order guard (design 6.5; the worker owns machines.current_session_id / last_applied_seq, decision 2026-11-02):
   - no current session                                   -> apply, switch to the job's session
   - job's session is current and seq > last_applied_seq  -> apply
@@ -30,6 +36,7 @@ Delivery order is not trusted; only first_received_at and seq decide.
 import logging
 import re
 import socket
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -143,20 +150,73 @@ def _maybe_confirm_command(job: DetectionJob, outcome, now: datetime) -> None:
         log.info("confirm command not created for job %s (%s)", job.id, type(exc).__name__)
 
 
+STOPPING = "stopping"   # run_once: the stop was requested before it looked at the queue
+RETURNED = "returned"   # run_once: a message arrived after the stop and was given back untouched
+
+
 class JudgementWorker:
-    def __init__(self, worker_id: str | None = None, clock=utcnow, lease_seconds: int = 55):
+    def __init__(self, worker_id: str | None = None, clock=utcnow, lease_seconds: int = 55, stop: threading.Event | None = None):
         # lease shorter than the 60 s visibility timeout: when the message reappears the lease has expired
         self.worker_id = worker_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
         self.clock = clock
         self.lease = timedelta(seconds=lease_seconds)
+        self.stop = stop if stop is not None else threading.Event()
+
+    # --- life cycle ------------------------------------------------------------------------------------
+
+    def request_stop(self) -> None:
+        """No new work from now on. Safe to call from a signal handler (it only sets an event)."""
+        self.stop.set()
+
+    @property
+    def stopping(self) -> bool:
+        return self.stop.is_set()
+
+    def prepare(self) -> dict:
+        """Load the models and run them once (YoloInference.preload) before anything is received. Adapters with nothing to load
+        (mock, http, test doubles) have no preload and are simply ready. A failure raises: the caller must not start consuming."""
+        preload = getattr(adapters.inference(), "preload", None)
+        return preload() if callable(preload) else {}
+
+    def serve(self, until_empty: bool = False, max_messages: int = 0) -> int:
+        """prepare(), then receive and process messages until the queue is empty (until_empty), max_messages were handled, or a stop was
+        requested. Returns how many messages were processed (a message given back after the stop does not count)."""
+        handled = 0
+        if self.stopping:
+            return handled
+        report = self.prepare()
+        if report:
+            log.info("judge-worker %s ready: %s", self.worker_id, " ".join(f"{k}={v}" for k, v in report.items()))
+        while not self.stopping and (not max_messages or handled < max_messages):
+            outcome = self.run_once()      # long poll (20 s on SQS) when idle
+            if outcome is None:
+                if until_empty:
+                    break
+                continue
+            if outcome in (STOPPING, RETURNED):
+                break
+            handled += 1
+        return handled
+
+    def _give_back(self, message: QueueMessage) -> None:
+        """A message that arrived after the stop: make it visible again now so another worker takes it without waiting 60 s."""
+        try:
+            adapters.queue().extend_visibility(message.receipt_handle, 0)
+        except QueueError as exc:      # it then comes back after the visibility timeout; nothing was claimed, nothing is lost
+            log.warning("could not give message %s back: %s", message.message_id, exc.code)
 
     # --- loop ------------------------------------------------------------------------------------------
 
     def run_once(self) -> str | None:
         """Receive and process at most one message. None when the queue had nothing."""
+        if self.stopping:
+            return STOPPING
         messages = adapters.queue().receive()
         if not messages:
             return None
+        if self.stopping:
+            self._give_back(messages[0])
+            return RETURNED
         return self.process(messages[0])
 
     def process(self, message: QueueMessage) -> str:

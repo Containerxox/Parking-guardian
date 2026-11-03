@@ -15,6 +15,8 @@ Changing the secrets therefore only affects rows that do not exist yet.
 import hashlib
 import hmac
 import os
+import signal
+import threading
 
 import click
 from sqlalchemy import select
@@ -68,28 +70,52 @@ def dev_api_key(serial_number: str) -> str:
     return f"pgk_dev_{serial_number.lower()}"
 
 
+def install_stop_handlers(stop: threading.Event) -> dict:
+    """SIGTERM (Kubernetes, `docker stop`) and SIGINT (Ctrl-C) set `stop` instead of killing the process; the loops finish the step they are in and
+    leave. Returns the previous handlers for restore_stop_handlers. Without this the process, being PID 1 in a container, ignores SIGTERM and is only
+    ever ended by SIGKILL after the whole grace period (measured: `docker stop` 6.5 s, exit code 137). Only the main thread can install handlers; anywhere
+    else this does nothing and returns {}."""
+    def handler(signum, frame):
+        stop.set()
+
+    previous = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous[signum] = signal.signal(signum, handler)
+    except ValueError:      # not the main thread
+        return {}
+    return previous
+
+
+def restore_stop_handlers(previous: dict) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+
 def register_cli(app) -> None:
     @app.cli.command("judge-worker")
     @click.option("--until-empty", is_flag=True, help="Stop when the queue has nothing (tests, one-off drains).")
     @click.option("--max-messages", type=int, default=0, help="Stop after this many messages (0 = no limit).")
     def judge_worker(until_empty: bool, max_messages: int):
-        """Phase 2 judgement worker (ADR 0019): receive, judge and apply queued photos, one at a time."""
+        """Phase 2 judgement worker (ADR 0019): load the models, then receive, judge and apply queued photos, one at a time.
+        SIGTERM/SIGINT: finish the message in hand, take no new one, exit 0. A model that cannot be loaded ends the process with an error
+        before the first receive (the queue is untouched)."""
         from . import adapters
+        from .adapters.inference import InferenceError
         from .services.worker import JudgementWorker
 
         if adapters.queue() is None:
             raise click.ClickException("QUEUE_BACKEND=none: there is no queue to work on.")
         worker = JudgementWorker()
-        handled = 0
+        previous = install_stop_handlers(worker.stop)   # before the (slow) model load, so a SIGTERM during it is honoured too
         click.echo(f"judge-worker {worker.worker_id} started")
-        while not max_messages or handled < max_messages:
-            outcome = worker.run_once()   # long poll (20 s on SQS) when idle
-            if outcome is None:
-                if until_empty:
-                    break
-                continue
-            handled += 1
-        click.echo(f"judge-worker {worker.worker_id} handled {handled} message(s)")
+        try:
+            handled = worker.serve(until_empty=until_empty, max_messages=max_messages)
+        except InferenceError as exc:
+            raise click.ClickException(f"model load failed, nothing was consumed: {exc}") from exc
+        finally:
+            restore_stop_handlers(previous)
+        click.echo(f"judge-worker {worker.worker_id} handled {handled} message(s)" + (" (stopped by signal)" if worker.stopping else ""))
 
     @app.cli.command("outbox-relay")
     @click.option("--once", is_flag=True, help="One pass (publish, DLQ, effects, clean-up) and exit.")
@@ -97,23 +123,24 @@ def register_cli(app) -> None:
     @click.option("--clean-every", type=int, default=1800, help="Run retention clean-up every N passes.")
     def outbox_relay(once: bool, interval: float, clean_every: int):
         """Phase 2 outbox relay (ADR 0019 decision 3): resend unpublished jobs, record dead letters, finish
-        pending effects, apply retention. Safe to run more than one."""
-        import time
-
+        pending effects, apply retention, recover stalled jobs. Safe to run more than one.
+        SIGTERM/SIGINT: finish the step in hand, skip the rest of the pass, exit 0."""
         from . import adapters
         from .services.relay import OutboxRelay
 
         if adapters.queue() is None:
             raise click.ClickException("QUEUE_BACKEND=none: there is no queue to relay to.")
-        relay = OutboxRelay()
-        passes = 0
-        while True:
-            stats = relay.run_once(clean=once or (clean_every and passes % clean_every == 0))
-            passes += 1
-            if once:
-                click.echo(f"outbox-relay pass: {stats}")
-                return
-            time.sleep(interval)
+        stop = threading.Event()
+        relay = OutboxRelay(stop=stop)
+        if once:
+            click.echo(f"outbox-relay pass: {relay.run_once(clean=True)}")
+            return
+        previous = install_stop_handlers(stop)
+        try:
+            passes = relay.run_loop(interval=interval, clean_every=clean_every)
+        finally:
+            restore_stop_handlers(previous)
+        click.echo(f"outbox-relay stopped after {passes} pass(es)")
 
     @app.cli.group("jobs")
     def jobs():
