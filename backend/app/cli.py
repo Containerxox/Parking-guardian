@@ -69,6 +69,76 @@ def dev_api_key(serial_number: str) -> str:
 
 
 def register_cli(app) -> None:
+    @app.cli.command("judge-worker")
+    @click.option("--until-empty", is_flag=True, help="Stop when the queue has nothing (tests, one-off drains).")
+    @click.option("--max-messages", type=int, default=0, help="Stop after this many messages (0 = no limit).")
+    def judge_worker(until_empty: bool, max_messages: int):
+        """Phase 2 judgement worker (ADR 0019): receive, judge and apply queued photos, one at a time."""
+        from . import adapters
+        from .services.worker import JudgementWorker
+
+        if adapters.queue() is None:
+            raise click.ClickException("QUEUE_BACKEND=none: there is no queue to work on.")
+        worker = JudgementWorker()
+        handled = 0
+        click.echo(f"judge-worker {worker.worker_id} started")
+        while not max_messages or handled < max_messages:
+            outcome = worker.run_once()   # long poll (20 s on SQS) when idle
+            if outcome is None:
+                if until_empty:
+                    break
+                continue
+            handled += 1
+        click.echo(f"judge-worker {worker.worker_id} handled {handled} message(s)")
+
+    @app.cli.command("outbox-relay")
+    @click.option("--once", is_flag=True, help="One pass (publish, DLQ, effects, clean-up) and exit.")
+    @click.option("--interval", type=float, default=2.0, help="Seconds between passes (design 6.7: 2 s).")
+    @click.option("--clean-every", type=int, default=1800, help="Run retention clean-up every N passes.")
+    def outbox_relay(once: bool, interval: float, clean_every: int):
+        """Phase 2 outbox relay (ADR 0019 decision 3): resend unpublished jobs, record dead letters, finish
+        pending effects, apply retention. Safe to run more than one."""
+        import time
+
+        from . import adapters
+        from .services.relay import OutboxRelay
+
+        if adapters.queue() is None:
+            raise click.ClickException("QUEUE_BACKEND=none: there is no queue to relay to.")
+        relay = OutboxRelay()
+        passes = 0
+        while True:
+            stats = relay.run_once(clean=once or (clean_every and passes % clean_every == 0))
+            passes += 1
+            if once:
+                click.echo(f"outbox-relay pass: {stats}")
+                return
+            time.sleep(interval)
+
+    @app.cli.group("jobs")
+    def jobs():
+        """Phase 2 detection job operations."""
+
+    @jobs.command("redrive")
+    @click.argument("job_ids", nargs=-1)
+    @click.option("--all-dead", is_flag=True, help="Every dead_lettered job.")
+    def jobs_redrive(job_ids, all_dead: bool):
+        """Send dead_lettered jobs again (they go back to pending_publish; the relay sends them)."""
+        import uuid as uuid_module
+
+        from .services.relay import redrive
+
+        if not job_ids and not all_dead:
+            raise click.UsageError("give job ids or --all-dead")
+        try:
+            ids = [uuid_module.UUID(value) for value in job_ids]
+        except ValueError:
+            raise click.UsageError("job ids must be UUIDs")
+        count = redrive(ids, all_dead=all_dead)
+        if not all_dead and count != len(ids):
+            raise click.ClickException(f"redrove {count} job(s); the others are not dead_lettered or do not exist")
+        click.echo(f"redrove {count} job(s)")
+
     @app.cli.command("device-key")
     @click.argument("serial")
     def device_key(serial: str):
