@@ -35,8 +35,44 @@ def pytest_report_header(config):
     return f"database: {TEST_DATABASE_URL.split('@')[-1]}"  # host/db only, never the password
 
 
+def _drop_all():
+    """Drop every table. On SQLite, DROP TABLE first deletes the rows, which RESTRICT foreign keys between the
+    Phase 2 tables (detection_results <- detection_jobs.result_id, device_sessions <- machines.current_session_id)
+    refuse while rows still point at them. Enforcement is switched off only for this; PostgreSQL drops the
+    cyclic constraints itself."""
+    db.session.remove()
+    if db.engine.dialect.name != "sqlite":
+        db.drop_all()
+        return
+    with db.engine.connect() as conn:   # no transaction open, so the PRAGMA takes effect
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    try:
+        db.drop_all()
+    finally:
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+@pytest.fixture(autouse=True)
+def _app_loggers_enabled():
+    """Migration tests run Alembic's env.py in this process, and its logging.config.fileConfig() disables every
+    logger that already exists (disable_existing_loggers defaults to True), including app.*. Later tests that
+    check logs with caplog would then see nothing. Deployed processes run `flask db upgrade` separately."""
+    import logging
+
+    for name, logger in list(logging.root.manager.loggerDict.items()):
+        if (name == "app" or name.startswith("app.")) and isinstance(logger, logging.Logger):
+            logger.disabled = False
+
+
 @pytest.fixture
-def app(tmp_path):
+def app_overrides():
+    """Extra app config for one test module (override this fixture there). Empty = Phase 1 defaults."""
+    return {}
+
+
+@pytest.fixture
+def app(tmp_path, app_overrides):
     app = create_app({
         "TESTING": True,
         "SQLALCHEMY_DATABASE_URI": TEST_DATABASE_URL,
@@ -47,16 +83,16 @@ def app(tmp_path):
         # Most tests care about what happens after a violation exists, so one sighting confirms it.
         # tests/test_episodes.py sets the real default (2) to test the confirmation rule itself.
         "VIOLATION_CONFIRM_COUNT": 1,
+        **app_overrides,
     })
     with app.app_context():
-        db.drop_all()  # leftovers from an interrupted run (matters for a real database server)
+        _drop_all()  # leftovers from an interrupted run (matters for a real database server)
         db.create_all()
     result = app.test_cli_runner().invoke(args=["seed"])
     assert result.exit_code == 0, result.output
     yield app
     with app.app_context():
-        db.session.remove()
-        db.drop_all()
+        _drop_all()
 
 
 @pytest.fixture

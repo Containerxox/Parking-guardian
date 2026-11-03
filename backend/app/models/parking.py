@@ -79,10 +79,22 @@ class Machine(db.Model):
     pending_violation_count = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     pending_since = db.Column(db.DateTime(timezone=True), nullable=True)       # first unconfirmed sighting
     clear_count = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+
+    # Phase 2 order guard (ADR 0019 decision 5, design 6.5). Only a job of the current session with a larger
+    # seq may change the episode state. Unused by the Phase 1 synchronous path (stays NULL / 0).
+    # use_alter: device_sessions also references machines, so one of the two foreign keys is added afterwards.
+    # RESTRICT (decision 2026-11-02): deleting the current session would clear it but leave last_applied_seq,
+    # a half-reset order guard. Retention cleanup skips each machine's current session instead.
+    current_session_id = db.Column(
+        db.Uuid, db.ForeignKey("device_sessions.session_id", ondelete="RESTRICT", use_alter=True,
+                               name="fk_machines_current_session_id"), nullable=True)
+    last_applied_seq = db.Column(db.Integer, nullable=False, default=0, server_default="0")
+
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
     parking_lot = db.relationship("ParkingLot", back_populates="machines", lazy="joined")
+    current_session = db.relationship("DeviceSession", foreign_keys=[current_session_id], post_update=True)
 
     __table_args__ = (db.CheckConstraint(in_list("status", Status.ALL), name="ck_machines_status"),)
 

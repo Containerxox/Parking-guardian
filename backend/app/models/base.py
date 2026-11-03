@@ -86,6 +86,72 @@ class EndReason:
     SIGNAL_LOST = "SIGNAL_LOST"            # photos stopped arriving for too long
 
 
+# --- Phase 2 asynchronous judgement (ADR 0019, design doc 6.4-6.10). Lowercase values as in the design. ---
+
+class DeviceEvent:
+    """Why an event-mode device sent a photo. Same values as services.detections.EVENTS."""
+
+    ARRIVED = "arrived"
+    CONFIRM = "confirm"
+    REFRESH = "refresh"
+    LEFT = "left"
+    ALL = (ARRIVED, CONFIRM, REFRESH, LEFT)
+
+
+class Verdict:
+    """Inference verdicts. Same values as adapters.inference (not imported: models stay free of the adapter)."""
+
+    VIOLATION = "violation"
+    PERMITTED = "permitted"
+    NO_VEHICLE = "no_vehicle"
+    ALL = (VIOLATION, PERMITTED, NO_VEHICLE)
+
+
+class JobStatus:
+    """detection_jobs.status (design 6.7 state diagram)."""
+
+    PENDING_PUBLISH = "pending_publish"  # in the database, not yet confirmed sent to SQS
+    QUEUED = "queued"                    # SQS send confirmed
+    PROCESSING = "processing"            # claimed by a worker until lease_until
+    DONE = "done"                        # verdict and episode change committed together
+    STALE = "stale"                      # verdict recorded, episode state left alone (order guard)
+    REJECTED = "rejected"                # permanent error (cannot decode, inbox photo missing)
+    DEAD_LETTERED = "dead_lettered"      # exceeded maxReceiveCount, moved to the DLQ
+    ALL = (PENDING_PUBLISH, QUEUED, PROCESSING, DONE, STALE, REJECTED, DEAD_LETTERED)
+
+
+class EffectsStatus:
+    """detection_jobs.effects_status: evidence copy + notification after commit. Only for a done job
+    that created a violation; NULL otherwise."""
+
+    PENDING = "pending"
+    DONE = "done"
+    FAILED = "failed"
+    ALL = (PENDING, DONE, FAILED)
+
+
+class SessionStatus:
+    ACTIVE = "active"
+    ENDED = "ended"            # left reported
+    SUPERSEDED = "superseded"  # a newer session of the same machine started (e.g. device reboot)
+    ALL = (ACTIVE, ENDED, SUPERSEDED)
+
+
+class CommandType:
+    CAPTURE_CONFIRM = "capture_confirm"
+    ALL = (CAPTURE_CONFIRM,)
+
+
+class CommandStatus:
+    PENDING = "pending"        # created by the worker
+    DELIVERED = "delivered"    # carried in a heartbeat response
+    FULFILLED = "fulfilled"    # a confirm photo with this command_id was received
+    CANCELLED = "cancelled"    # session ended, left, or a new session
+    EXPIRED = "expired"        # expires_at passed
+    ALL = (PENDING, DELIVERED, FULFILLED, CANCELLED, EXPIRED)
+    ACTIVE = (PENDING, DELIVERED)
+
+
 def in_list(column: str, values) -> str:
     """Build a portable CHECK expression: column IN ('A', 'B')."""
     quoted = ", ".join(f"'{v}'" for v in values)
