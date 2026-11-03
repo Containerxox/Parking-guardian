@@ -89,6 +89,9 @@ class MockInference:
     name = "mock"
     state = "ready"  # nothing to load
 
+    def preload(self, **kwargs) -> dict:
+        return {}
+
     def __init__(self, default_verdict: str = VIOLATION):
         self.default_verdict = default_verdict
 
@@ -153,6 +156,61 @@ class YoloInference:
     def _set_state(self, state: str) -> None:
         self.state = state
         metrics.MODEL_STATE.state(state)
+
+    def preload(self, clock=time.perf_counter, sleep=time.sleep) -> dict:
+        """Load the models AND run both of them once, synchronously. For the queue worker, which has no readiness gate (P5).
+
+        warm_up() below loads in the background and returns at once; that suits gunicorn, where /readyz stays 503 until the models
+        are in memory. A worker that calls receive() before this returns would pay the load inside its 55-second lease.
+        Retries like warm_up (load_attempts, retry_delay * attempt) but in the caller's thread. After the last failure `gave_up` is
+        True and InferenceError is raised, so the caller exits without having consumed anything.
+
+        Reports the costs separately because they differ on a fresh Pod (seconds, rounded to milliseconds):
+          load_seconds              torch.hub.load of both checkpoints (disk -> memory)
+          first_inference_seconds   first forward pass of both models: allocator, kernel and thread-pool start-up
+          second_inference_seconds  the same pass again = the steady cost
+        """
+        if self.state == "cold":
+            self._set_state("loading")
+        load_seconds, attempts = 0.0, 0
+        for attempt in range(1, self.load_attempts + 1):
+            attempts = attempt
+            started = clock()
+            try:
+                self._ensure_loaded()
+                load_seconds = clock() - started
+                break
+            except InferenceError:
+                if attempt == self.load_attempts:
+                    self.gave_up = True
+                    log.error("model load failed %d times, giving up", self.load_attempts)
+                    raise
+                sleep(self.retry_delay * attempt)
+                self._set_state("loading")
+        passes = []
+        for _ in range(2):
+            started = clock()
+            try:
+                self._warm_forward()
+            except Exception as exc:   # out of memory, incompatible kernels ...: better to stop now than on a customer photo
+                self._set_state("failed")
+                log.exception("warm-up inference failed")
+                raise InferenceError(f"warm-up inference failed: {exc}") from exc
+            passes.append(clock() - started)
+        report = {"attempts": attempts, "load_seconds": round(load_seconds, 3),
+                  "first_inference_seconds": round(passes[0], 3), "second_inference_seconds": round(passes[1], 3)}
+        metrics.MODEL_FIRST_INFERENCE_SECONDS.set(report["first_inference_seconds"])
+        return report
+
+    def _warm_forward(self) -> None:
+        """One throwaway forward pass of BOTH models on a blank image. The sticker model only runs when a windshield is found, so a pass through
+        the window model alone would leave its first-call cost to the first real photo."""
+        import numpy as np
+
+        image = np.full((480, 640, 3), 114, dtype=np.uint8)
+        with self._lock:
+            self._detect(self._window_model, image, self.image_size)
+            self._detect(self._sticker_model, image, self.image_size)
 
     def warm_up(self) -> None:
         """Load the models in a background thread (called once per gunicorn worker, see gunicorn.conf.py).
@@ -385,6 +443,9 @@ class HttpInference:
 
     def warm_up(self) -> None:
         """Nothing to load here; the inference service warms itself up."""
+
+    def preload(self, **kwargs) -> dict:
+        return {}
 
     def analyze(self, image_bytes: bytes, filename: str = "") -> InferenceResult:
         if not self._slots.acquire(blocking=False):

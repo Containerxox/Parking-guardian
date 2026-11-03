@@ -61,7 +61,10 @@ AI_CLIENT_RETRIES = Counter(
     ["reason"])
 AI_CLIENT_IN_FLIGHT = Gauge(
     "pg_ai_client_in_flight", "Calls to the inference service in progress (the bulkhead counts these).")
-MODEL_LOAD_SECONDS = Gauge("pg_model_load_seconds", "Wall time of the last successful model load.")
+MODEL_LOAD_SECONDS = Gauge("pg_model_load_seconds", "Wall time of the last successful model load (checkpoints, disk -> memory).")
+MODEL_FIRST_INFERENCE_SECONDS = Gauge(
+    "pg_model_first_inference_seconds",
+    "Wall time of the first forward pass of both models after the load (worker preload). Separate from the load itself.")
 MODEL_STATE = Enum("pg_inference_model_state", "Model state of this process.",
                    states=["cold", "loading", "ready", "failed"])
 
