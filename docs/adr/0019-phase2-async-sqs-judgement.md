@@ -375,6 +375,43 @@ Terraform 코드(data: SQS FIFO 2개 + inbox 수명 주기, cluster: worker·rel
 | DLQ | SQS 지표 `ApproximateNumberOfMessagesVisible`(DLQ) | 1 이상 |
 | 오래된 pending_publish | 기존 로그 `pending_publish older than 5 min` | 기존 설계(5분) |
 
+### P4·P5: SIGTERM 정상 종료와 모델 선로딩 (2026-11-03, 사용자 승인, 로컬 코드·테스트, AWS 변경 없음)
+
+**P5 모델 선로딩.** 이전에는 `flask judge-worker` 가 모델을 읽지 않았고, 첫 메시지를 판정할 때 `_ensure_loaded()` 가 로딩(로컬 약 10~34초)을 lease 55초 안에서 치렀다. `warm_up()` 은 백그라운드 스레드로 로딩하고 곧바로 돌아오는 gunicorn 용이라 Worker 에는 쓸 수 없다(Worker 에는 readiness 문이 없다).
+- `YoloInference.preload()` (동기): 로딩(`load_attempts`, `retry_delay × 시도` 재시도) → 두 모델을 빈 이미지로 **두 번** 순전파. 실패하면 `InferenceError`(상태 `failed`, `gave_up`). 보고값: `load_seconds`, `first_inference_seconds`, `second_inference_seconds`(밀리초 반올림), 지표 `pg_model_first_inference_seconds`. 스티커 모델은 윈도가 잡힐 때만 쓰이므로 순전파 워밍업은 **두 모델을 모두** 지난다.
+- `JudgementWorker.serve()` = `prepare()`(= `preload()`, 없는 어댑터는 건너뜀) → 루프. **첫 receive 전에** 끝낸다. 로딩이 실패하면 예외 → CLI 가 `model load failed, nothing was consumed` 로 종료 코드 1(큐·작업 불변, 판정 없음). 컨테이너는 재시작되고 반복 실패는 CrashLoopBackOff 로 늦춰진다.
+
+**P4 정상 종료.** 이전에는 핸들러가 없어 PID 1 인 Python 이 SIGTERM 을 무시했다(로컬 실측: `docker stop` 6.5초 뒤 종료 코드 137).
+- `cli.install_stop_handlers(stop)`: SIGTERM·SIGINT 가 이벤트만 세운다(모델 로딩 **전에** 설치해 로딩 중 신호도 받는다). 메인 스레드가 아니면 아무것도 안 한다.
+- Worker: 중지 요청 뒤에는 receive 하지 않는다. 처리 중인 메시지는 판정·반영·부수 효과·삭제까지 마친다. 긴 폴링이 신호 뒤에 메시지를 돌려주면 **claim 하지 않고** `ChangeMessageVisibility(0)` 으로 즉시 돌려준다(반납 실패는 로그만, 메시지는 60초 뒤 돌아온다). 종료 코드 0.
+- Relay: `OutboxRelay(stop=...)`. 단계 사이와 장비·작업·메시지 루프 사이에서만 멈춘다(작업 하나의 전송·기록은 끝낸다). 회차 사이 대기는 `Event.wait` 라 신호 즉시 깬다. `run_once` 결과에 `stopped`.
+- 숫자의 관계(테스트로 고정): lease 55초 < SQS visibility 60초(Terraform 기본값과 같음) ≤ Worker `terminationGracePeriodSeconds` 60초. 긴 폴링 20초 + 판정 수 초 < 유예 60초. 유예 안에 못 끝나 SIGKILL 이 되면 데이터는 그대로 안전하다: lease 가 끝나고 메시지가 visibility 뒤 돌아오며 다른 Worker 가 claim, `claim_attempt` 펜싱이 죽은 Worker 의 늦은 결과를 버린다.
+
+**검증 (먼저 테스트, 구현 전 실패 확인)**
+- 새 테스트: `test_inference_preload.py` 8개, `test_worker_lifecycle.py` 16개(선로딩 순서, 실패 시 미소비, 로딩 중·루프 전·처리 중 중지, 신호 뒤 수신 메시지 반납과 반납 실패, SIGKILL 인계, lease·visibility·유예 관계(Terraform·매니페스트 교차 확인), 핸들러 설치·복원, Relay 장비 사이 중지·회차 시작 전 중지·대기 중 깨어남). 결함 주입 9가지 중 8가지를 잡았다. 생존 1개("서브 루프가 중지를 무시")는 `run_once` 가 `STOPPING` 을 돌려 빠져나오는 이중 방어라 동작이 같은 동등 변형이다.
+- 전체: SQLite 552 통과(건너뜀 30), PostgreSQL 582 통과(건너뜀 0), 장비 97 통과. 기존 Phase 1 동기 경로 테스트 변경 없음.
+- Compose(ElasticMQ + Moto + 실제 YOLO, `integration/phase2/shutdown.py`, DB 행 잠금으로 "처리 중"을 결정적으로 만듦):
+
+| 시나리오 | 결과 |
+|---|---|
+| W1 선로딩 | 시작 → ready 16.2초(모델 로딩 13.4초 + 첫 순전파 1.24초 + 두 번째 1.59초). 대기 중이던 첫 사진은 ready **뒤에** 판정되었고 판정 시간 875 ms. (CPU 경합이 있던 첫 실행: 로딩 20.2초, 순전파 2.4/3.1초, ready 25.6초, 첫 사진 1391 ms) |
+| W2 유휴 `docker stop` | 15.6초, 종료 코드 0 (긴 폴링 잔여) |
+| W3 처리 중 SIGTERM | 그 작업은 `done`(claim 1, 결과 1건), 같은 장비의 다음 작업은 `queued`(claim 0), 5.7초 뒤 종료 코드 0, 로그 `handled 1 message(s) (stopped by signal)` |
+| W4 처리 중 SIGKILL | 죽인 뒤 62.9초에 다른 Worker 가 `done`(claim_attempt 2, 결과 1건, 큐 비음) |
+| W5 모델 로딩 중 SIGTERM | 로딩이 끝나길 기다려 13.1초 뒤 종료 코드 0, 작업 `queued`(claim 0), `handled 0` |
+| W6 모델 파일 없음 | 종료 코드 1, `model load failed, nothing was consumed`, 작업 불변 |
+| W7 Relay `docker stop` | 0.8초, 종료 코드 0 |
+
+**측정에서 얻은 사실.** 첫 순전파는 두 번째와 거의 같다(1.24 vs 1.59초, 2.4 vs 3.1초): 이 CPU 환경에서 "첫 호출 초기화" 비용은 작고, 선로딩의 이득은 거의 전부 **모델 로딩(13~20초)을 첫 메시지의 lease 밖으로 옮긴 것**이다. 두 값을 나눠 기록하므로 EKS 에서 다르게 나오면 알 수 있다.
+
+**남은 한계 (해결로 표시하지 않음)**
+- 핸들러 설치 전(컨테이너 시작 후 수 초, Python·Flask import 중)에 도착한 SIGTERM 은 PID 1 이 무시한다 → 유예 시간 뒤 SIGKILL. 데이터는 안전하다.
+- 신호 뒤 반납한 메시지는 receive 를 한 번 더 쓴다(`maxReceiveCount` 3). 한 메시지가 세 번 연속 종료와 겹치지 않는 한 DLQ 로 가지 않는다.
+- 유휴 Worker 의 종료는 진행 중인 긴 폴링(최대 20초)을 기다린다(W2: 15.6초). 유예 60초 안이다.
+- 멈춘(교착) 프로세스는 여전히 못 잡는다 → config 리포 `docs/phase2.md` 6.5.
+- `docker kill` 은 Docker 가 수동 정지로 취급해 재시작 정책이 적용되지 않는다(하네스에서 직접 시작). Kubernetes 의 kubelet 은 재시작한다.
+- 이 변경은 Phase 1 동기 경로를 건드리지 않는다(`flask judge-worker`·`outbox-relay`·`YoloInference` 에 메서드 추가와 `run_once` 결과 키 `stopped` 추가뿐).
+
 ## 근거
 
 - 코드: `backend/app/services/detections.py`(Machine 행 잠금, 처리 시각 사용, 2회 확정이 모든 이벤트 사진을 셈), `backend/app/models/parking.py`(상태 소유자 Machine, ParkingZone.machine_id), `backend/app/services/notifications.py`(알림 유니크 키), `device/pi_client.py`(응답 의존 confirm, 재시도 없음).
