@@ -87,12 +87,61 @@ def _resolve_zone(machine: Machine, zone_name: str | None) -> ParkingZone | None
     return zones[0] if len(zones) == 1 else None
 
 
+def _later(stored: datetime | None, value: datetime) -> datetime:
+    """Signal times only move forward: a photo applied late or out of order must not pull them back."""
+    stored = as_utc(stored)
+    return value if stored is None or value > stored else stored
+
+
+# record_verdict(previous_signal_at=...) not given: read the machine row (Phase 1). None is a real value there
+# (the machine had no signal before this photo), so a separate marker is needed.
+FROM_MACHINE_ROW = object()
+
+
+def _create_episode_in_caller_transaction(machine: Machine, zone, first_seen: datetime, sightings: int,
+                                          now: datetime) -> DetectionOutcome:
+    """Rule 1 confirmation for record_verdict(commit=False). If another transaction created the machine's
+    active episode first (unique index), only the savepoint is rolled back and the sighting counts as ongoing."""
+    try:
+        with db.session.begin_nested():
+            violation = violation_service.create_violation(machine, zone, first_seen)
+    except IntegrityError:
+        log.info("episode already exists for machine %s, treating as ongoing", machine.id)
+        active = _active_episode(machine.id)
+        if active is not None:
+            active.last_seen_at = _later(active.last_seen_at, now)
+            active.detection_count = (active.detection_count or 1) + 1
+        db.session.flush()
+        return DetectionOutcome(RESULT_ONGOING, violation=active)
+    violation.last_seen_at = now
+    violation.detection_count = sightings
+    _reset_counters(machine)
+    db.session.flush()
+    return DetectionOutcome(RESULT_NEW, violation=violation, created=True)
+
+
 def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_name: str | None = None,
-                   event: str | None = None) -> DetectionOutcome:
+                   event: str | None = None, observed_at: datetime | None = None,
+                   previous_signal_at=FROM_MACHINE_ROW, commit: bool = True) -> DetectionOutcome:
     """Apply one photo's verdict to the machine's episode state and commit.
+
+    `commit=False` (Phase 2 worker, decision 2026-11-02): only flush, inside the caller's transaction, so the
+    verdict, the result row and the job's done status commit or roll back together. The race on the unique
+    active-episode index then uses a savepoint instead of rolling back the caller's transaction. The default
+    (commit=True) is the Phase 1 behaviour, unchanged.
 
     `event` is the device's reason for sending the photo (one of EVENTS) or None for an interval-mode
     device. Only EVENT_LEFT changes anything here (rule 3); the verdict always comes from the photo.
+
+    `observed_at` is when the server received the photo (ADR 0019 decision 6, design 6.6). Every server-side
+    time of the episode uses it: the silence check (rule 4), last_detection_at / last_heartbeat_at,
+    last_seen_at and end times. A Phase 2 worker passes the job's received_at, so a photo that waited in the
+    queue is judged as of its arrival. The Phase 1 synchronous endpoint passes nothing and gets the processing
+    time, as before. `detected_at` (device clock) is still only used for display (pending_since, detected_at).
+
+    `previous_signal_at` is the machine's last signal just before this photo, as snapshotted by the Phase 2
+    ingest (detection_jobs.prev_signal_at; None = no earlier signal). Ingest refreshes the machine's signal at
+    receipt, so the worker must not read it from the machine row. Not given (Phase 1): read the machine row.
 
     Image storage and notification are NOT done here: the caller does them only when
     outcome.created is True, so they happen once per episode.
@@ -101,7 +150,8 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
     confirm_count = max(1, config["VIOLATION_CONFIRM_COUNT"])
     clear_count = max(1, config["VEHICLE_CLEAR_COUNT"])
     gap = timedelta(minutes=config["EPISODE_GAP_MINUTES"])
-    now = utcnow()
+    now = as_utc(observed_at) if observed_at is not None else utcnow()
+    finish = db.session.commit if commit else db.session.flush
 
     # Lock the machine row so two photos of the same machine are applied one after the other.
     # (PostgreSQL honours FOR UPDATE; SQLite serialises writers anyway.)
@@ -111,9 +161,13 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
     active = _active_episode(machine.id)
 
     # Rule 4: a long silence invalidates whatever was being counted. The last signal is the later of
-    # the last judged photo and the last heartbeat.
-    signals = [t for t in (as_utc(machine.last_detection_at), as_utc(machine.last_heartbeat_at)) if t is not None]
-    previous = max(signals) if signals else None
+    # the last judged photo and the last heartbeat. A heartbeat that arrived while this photo waited in a
+    # queue is later than `now`, so the difference is negative: no silence before this photo.
+    if previous_signal_at is FROM_MACHINE_ROW:
+        signals = [t for t in (as_utc(machine.last_detection_at), as_utc(machine.last_heartbeat_at)) if t is not None]
+        previous = max(signals) if signals else None
+    else:
+        previous = as_utc(previous_signal_at)
     if previous is not None and now - previous > gap:
         if active is not None:
             last_seen = as_utc(active.last_seen_at) or previous
@@ -123,15 +177,15 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
             active = None
         _reset_counters(machine)
 
-    machine.last_detection_at = now
-    machine.last_heartbeat_at = now
+    machine.last_detection_at = _later(machine.last_detection_at, now)
+    machine.last_heartbeat_at = _later(machine.last_heartbeat_at, now)
 
     if verdict == VIOLATION:
         machine.clear_count = 0
         if active is not None:  # Rule 2
-            active.last_seen_at = now
+            active.last_seen_at = _later(active.last_seen_at, now)
             active.detection_count = (active.detection_count or 1) + 1
-            db.session.commit()
+            finish()
             return DetectionOutcome(RESULT_ONGOING, violation=active)
 
         # Rule 1
@@ -139,12 +193,14 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
         if machine.pending_violation_count == 1:
             machine.pending_since = detected_at
         if machine.pending_violation_count < confirm_count:
-            db.session.commit()
+            finish()
             return DetectionOutcome(RESULT_PENDING)
 
         first_seen = as_utc(machine.pending_since) or detected_at
         sightings = machine.pending_violation_count
         zone = _resolve_zone(machine, zone_name)
+        if not commit:
+            return _create_episode_in_caller_transaction(machine, zone, first_seen, sightings, now)
         try:
             violation = violation_service.create_violation(machine, zone, first_seen)
             violation.last_seen_at = now
@@ -158,7 +214,7 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
             log.info("episode already exists for machine %s, treating as ongoing", machine_id)
             active = _active_episode(machine_id)
             if active is not None:
-                active.last_seen_at = now
+                active.last_seen_at = _later(active.last_seen_at, now)
                 active.detection_count = (active.detection_count or 1) + 1
                 db.session.commit()
             return DetectionOutcome(RESULT_ONGOING, violation=active)
@@ -182,6 +238,6 @@ def record_verdict(machine_id: int, verdict: str, detected_at: datetime, zone_na
                 _end_episode(active, EndReason.VEHICLE_LEFT, now, "차량이 주차 구역을 벗어난 것을 확인했습니다.")
             machine.clear_count = 0
             ended = True
-    db.session.commit()
+    finish()
     return DetectionOutcome(verdict if verdict in (NO_VEHICLE, PERMITTED) else NO_VEHICLE,
                             violation=active, episode_ended=ended)

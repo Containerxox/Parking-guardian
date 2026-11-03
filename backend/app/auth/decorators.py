@@ -106,7 +106,19 @@ def _to_int(value) -> int | None:
 
 # 장비가 살아있다는 마지막 시간 기록
 def touch_heartbeat(machine: Machine) -> None:
-    machine.last_heartbeat_at = utcnow()
+    """Record a heartbeat, but never move the signal time backwards (decision 2026-11-02).
+
+    A photo received a moment after this heartbeat read the clock may already have stored a later time (Phase 2
+    ingest, or a Phase 1 photo). The conditional UPDATE is evaluated after any row lock it waits for, so the
+    later value wins on PostgreSQL too. The caller commits, as before."""
+    from sqlalchemy import or_, update
+
+    now = utcnow()
+    db.session.execute(
+        update(Machine).where(Machine.id == machine.id,
+                              or_(Machine.last_heartbeat_at.is_(None), Machine.last_heartbeat_at < now))
+        .values(last_heartbeat_at=now, updated_at=now).execution_options(synchronize_session=False))
+    db.session.expire(machine, ["last_heartbeat_at", "updated_at"])
 
 # 장비가 현재 온라인인지 확인
 def machine_online(machine: Machine) -> bool:
