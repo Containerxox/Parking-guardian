@@ -32,7 +32,7 @@
 | [0016](0016-s3-image-storage.md) | 위반 사진은 S3에 저장하고, 브라우저에는 지금처럼 Backend가 내려준다 | 2026-10-25 |
 | [0017](0017-remove-plate-ocr.md) | 번호판 OCR을 MVP에서 제거한다 | 2026-10-25 |
 | [0018](0018-phase1-sync-inference-service.md) | AI 추론을 별도 서비스로 분리하고, API 는 타임아웃과 동시 호출 상한을 둔 동기 HTTP 로 부른다 (Phase 1) | 2026-10-30 제안 |
-| [0019](0019-phase2-async-sqs-judgement.md) | 사진 접수와 AI 판별을 S3 + SQS FIFO 로 나누고, 상태 이벤트는 큐를 거치지 않는다 (Phase 2) | 2026-10-30 제안 |
+| [0019](0019-phase2-async-sqs-judgement.md) | 사진 접수와 AI 판별을 S3 + SQS FIFO 로 나누고, 상태 이벤트는 큐를 거치지 않는다 (Phase 2) | 2026-11-02 결정됨 (2026-10-30 제안) |
 
 "제안"은 설계만 확정하고 구현과 측정이 남은 것이다. 구현 뒤 측정값을 채우고 "결정됨"으로 바꾼다.
 

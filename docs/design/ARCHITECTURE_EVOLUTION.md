@@ -472,7 +472,7 @@ Phase 2 추가: 접수 응답 시간, SQS 대기 수·가장 오래된 메시지
 
 ## 6. Phase 2 설계 — ADR 0019 초안: S3 + SQS 기반 비동기 판별
 
-> 상태: **제안**. Phase 1 측정 결과를 보고 확정한다.
+> 상태: **결정됨** (2026-11-02, ADR 0019 "확정 근거" 절). 이 장의 설계는 확정 때 바꾸지 않았다.
 
 ### 6.1 문제
 
@@ -539,6 +539,8 @@ Machine 행에 `current_session_id`, `last_applied_seq` 를 둔다. Worker 의 �
 
 `left` 판별의 예외: 장비 재부팅으로 세션 A 가 끝나기 전에 세션 B 가 시작될 수 있다. 세션 A 의 사건이 열려 있고 그 뒤 세션 B 가 같은 차를 계속 보고 있다면, A 의 `left` 사진으로 사건을 닫으면 안 된다. 그래서 **left 판별이 사건을 닫는 조건은 "그 사건이 현재 세션의 것일 때"** 로 제한한다. 지금 코드의 "left + no_vehicle 이면 1회로 종료" 규칙은 현재 세션 안에서만 적용된다.
 
+**가드 상태의 주인 (2026-11-02 결정, ADR 0019 변경 기록)**: `current_session_id`·`last_applied_seq` 는 **Worker 만** 바꾼다. 접수 API 는 세션 행만 등록한다. Worker 는 현재 세션이 없거나 작업의 세션을 서버가 더 늦게 처음 봤으면(`first_received_at`, 같으면 session_id) 반영하면서 그 세션으로 전환하고, 같은 세션이면 seq 가 더 클 때만 반영한다. 큐 전달 순서는 믿지 않는다. (접수 시점에 전환하면 큐에 남은 이전 세션 작업이 전부 stale 이 되어 위반이 사라진다.)
+
 **순서를 큐 단계에서도 지킨다**: 같은 장비의 더 오래된 작업이 아직 `pending_publish` 이면, 새 작업도 즉시 전송하지 않고 `pending_publish` 로 둔다. 재전송기는 장비마다 `seq` 순서로 보낸다. 그래서 SQS 전송 실패가 순서 뒤바뀜으로 이어지지 않는다. 가드는 그래도 남는 경우(수동 redrive, 재부팅)를 위한 두 번째 방어선이다.
 
 ### 6.6 시각 기준 변경 (코드에서 확인한 위험)
@@ -547,6 +549,7 @@ Machine 행에 `current_session_id`, `last_applied_seq` 를 둔다. Worker 의 �
 
 - 변경: `record_verdict(..., observed_at=job.received_at)` 로 **API 접수 시각**을 넘긴다. `last_detection_at`, `last_seen_at`, 종료 시각은 접수 시각을 쓴다.
 - 끊김 판정은 상태 경로에서 갱신하는 "마지막 신호 시각"(접수 시각 또는 Heartbeat 중 늦은 것)으로 한다. 큐 지연이 10분을 넘어도 정상 장비가 SIGNAL_LOST 로 닫히지 않는다.
+- **구체화 (2026-11-02, ADR 0019 변경 기록)**: 접수 API 가 장비 행을 잠근 채 갱신 **전** 마지막 신호 시각을 `detection_jobs.prev_signal_at` 에 저장한 뒤 신호 시각을 갱신한다. Worker 는 `record_verdict(observed_at=received_at, previous_signal_at=prev_signal_at)` 로 "이 사진 직전의 공백" 을 판단한다(접수가 먼저 갱신한 값을 Worker 가 읽으면 공백이 항상 0 이 되므로). 공백을 가진 작업이 stale 로 반영되지 않으면 SIGNAL_LOST 가 누락될 수 있다(5단계에서 검증).
 - Phase 1 동기 경로에서는 접수 시각 ≈ 처리 시각이므로 동작이 바뀌지 않는다. 기존 테스트로 회귀를 확인한다.
 
 ### 6.7 아웃박스: 작업 행, 재전송기, 상태 전이
@@ -561,7 +564,9 @@ detection_jobs
   claim_attempt (fencing)      lease_until        worker_id
   result_id → detection_results   violation_id (이 작업이 만든 위반)   effects_status
   last_error   created_at   updated_at
-detection_results   (job_id UNIQUE, verdict, window, stickers, elapsed_ms, model_version, applied: bool)
+detection_results   (job_id UNIQUE NULL 허용, verdict, window, stickers, elapsed_ms, model_version, applied: bool,
+                     추적: machine_id, violation_id, event_id, session_id, seq, event, received_at,
+                     UNIQUE(machine_id, event_id))   ← 2026-11-02 변경, ADR 0019 변경 기록
 device_sessions     (session_id PK, machine_id, first_received_at, status active|ended|superseded, left_reported_at)
 device_commands     (command_id PK, machine_id, session_id, type, due_at, expires_at, status, source_job_id,
                      UNIQUE(machine_id, session_id, type) WHERE status IN (pending, delivered))
@@ -608,8 +613,11 @@ effects_status (done 이고 이 작업이 위반을 만들었을 때만): pendin
 | 일 2: DLQ 감시 | DLQ 를 읽어 해당 작업을 `dead_lettered`(+ 마지막 오류)로 바꾸고 DLQ 메시지는 지운다. **DB 가 진실의 원천**이고 DLQ 는 운반 수단이다. redrive = 작업을 `pending_publish` 로 되돌리는 관리 명령 `flask jobs redrive <id|--all-dead>` |
 | 일 3: 부수 효과 마무리 | `done` 이고 `effects_status = pending` 이며 5분 지난 작업의 증거 사진 복사·알림을 다시 실행(멱등) |
 | 일 4: 정리 | 보존 기간이 지난 작업 행 삭제(6.12) |
+| 일 5: 멈춘 작업 복구 (2026-11-03 추가) | SQS 메시지가 사라지면(보존 4일 만료, Relay 가 멈춘 사이 만료된 DLQ 메시지, Worker 사망 뒤 유실) 작업은 `queued`/`processing` 으로 영원히 남는다. `queued` 이고 `COALESCE(published_at, updated_at)` 이 1일 넘었거나, `processing` 이고 `COALESCE(lease_until, updated_at)` 이 1일 넘은 작업을 inbox 사진 확인 뒤 `pending_publish`(claim_attempt + 1)로 되돌려 일 1이 다시 보낸다. 사진이 없으면 `rejected`(`missing_image`). `pending_publish`·`dead_lettered`·끝난 작업은 대상이 아니다. 자세한 조건과 근거는 ADR 0019 "10단계 AWS 인프라 사전 검토" |
 | 다중 실행 | `SKIP LOCKED` 로 2개가 동시에 돌아도 같은 작업을 두 번 잡지 않는다. 중복 전송이 생겨도 dedup ID 와 claim 이 막는다 |
 | 장애 영향 | 재전송기가 죽어도 API 즉시 전송 경로는 동작한다. 재전송기는 실패분 회수와 정리만 맡는다 |
+
+**구현 (2026-11-02, 로컬, `backend/app/services/relay.py`, `flask outbox-relay`, `flask jobs redrive`)**: 위 표 그대로 구현했다. 바뀐·추가된 세부는 ADR 0019 변경 기록(6단계): ① 장비별 접수 순서, 기한 전·남이 잡은·실패한 첫 작업에서 그 장비 정지 ② redrive 는 마지막 전송 + 5분 뒤에 발행(SQS 중복 제거 창 안의 재전송은 조용히 버려지므로) ③ 읽을 수 없는·없는 작업 메시지는 **DLQ 에서 지우지 않고** 식별 정보만 기록, 1시간 숨김 ④ 부수 효과는 실패한 부분만 재시도, 3회 실패 뒤 `failed` ⑤ 보존 정리는 현재 세션·`dead_lettered`·처리 중·부수 효과 대기 작업을 남긴다.
 
 API 는 접수 트랜잭션 commit 뒤 **즉시 전송을 한 번 시도**한다(지연을 줄이는 최적화). 실패하거나 같은 장비의 앞 작업이 대기 중이면 재전송기에 맡기고 202 를 준다.
 
@@ -644,6 +652,8 @@ API 는 접수 트랜잭션 commit 뒤 **즉시 전송을 한 번 시도**한다
 ```
 
 Worker = SQS 소비 + `YoloInference` + 사건 반영. Phase 1 inference 이미지에 앱 코드를 더한 이미지. 프로세스 1, 동시 처리 1, 락 유지. Worker 는 DB 자격 증명이 필요하다(Phase 1 inference 와 다른 점. ADR 에 기록).
+
+**구현 (2026-11-02, 로컬, `backend/app/services/worker.py`, `flask judge-worker`)**: 위 1~7 그대로. 세부(ADR 0019 변경 기록): lease 55초 < Visibility 60초. 5단계 반영 트랜잭션 안에서 `record_verdict(commit=False)` → 결과 행(작업 추적 정보 복사) → `violation_id` 연결 → confirm 명령(세션 `active` 이고 `violation_pending` 이며 `left` 가 아닐 때만) → 작업 done/stale. 일시 오류는 lease 즉시 반납·메시지 유지, 읽을 수 없는 메시지는 가시성 0 으로 돌려 redrive 로 DLQ. 알려진 한계: 끊김 공백을 가진 작업이 순서 역전으로 stale 이 되면 SIGNAL_LOST 를 놓친다(테스트로 고정).
 
 ### 6.9 confirm 타이밍 분석 (D4)
 
@@ -681,6 +691,10 @@ POST /device/heartbeat
 
 **명령 생명 주기**: `pending`(Worker 가 생성) → `delivered`(Heartbeat 응답에 실림) → `fulfilled`(그 command_id 를 단 confirm 사진이 접수됨) | `cancelled`(세션 종료, left, 새 세션) | `expired`(`expires_at` 경과).
 
+**구현 (2026-11-02, 로컬, `backend/app/services/commands.py`)**: Heartbeat 가 보낸 `session_id` 가 그 장비의 `active` 세션일 때만 그 세션 명령을 싣는다. `acked_commands` → `cancelled`, 만료는 다음 Heartbeat 때 `expired`. 모든 전이는 `pending`·`delivered` 에서만 일어나는 조건부 UPDATE. Phase 1 Heartbeat(본문 없음)는 `commands: []` 만 더 받는다. 세부와 남은 운영 위험은 ADR 0019 변경 기록.
+
+**명령 하나에 confirm 작업은 하나 (2026-11-02, ADR 0019 변경 기록 "8단계 보완 2")**: 같은 `command_id` 를 단 다른 `event_id` 의 confirm 은 새 작업이 아니라 기존 작업을 돌려주는 200(`reason: command_already_confirmed`)으로 답하고 아무것도 저장하지 않는다. `detection_jobs.command_id` + 장비별 부분 UNIQUE(`command_id IS NOT NULL`)가 근거이고 명령 상태(fulfilled·cancelled·expired)와 무관하다. 같은 `event_id` 에 다른 `command_id` 는 409. 명시적으로 보낸 `command_id` 는 그 장비·그 사진의 세션의 `capture_confirm` 명령이어야 하고(`confirm` 사진에 한해), 아니면 **409 `command_conflict`** 로 거절하며 아무것도 저장하지 않는다(2026-11-02 사용자 결정. 처음 구현은 무시하고 판정했다). `command_id` 없는 사진은 그대로다. 첫 작업이 `rejected`·`dead_lettered` 이면 그 명령의 confirm 판정은 없다(refresh 가 대신하며 `dead_lettered` 는 redrive 가능). 보호 기록은 작업 행이라 끝난 작업이 삭제되는 30일 뒤에는 사라진다.
+
 | 상황 | 처리 |
 |---|---|
 | **중복 전달** | 서버는 `fulfilled` 전까지 매 Heartbeat 에 같은 명령을 다시 싣는다. 장비는 실행한 command_id 를 최근 50개 파일에 저장하고 같은 ID 는 무시한다 |
@@ -697,22 +711,25 @@ POST /device/heartbeat
 
 | 항목 | 정책 |
 |---|---|
-| 로컬 아웃박스 | 보낼 사진과 메타데이터(event_id, session_id, seq, event, command_id, detected_at)를 SD 카드 디렉터리에 먼저 쓴다. 최대 20건 / 50 MB. 넘치면 가장 오래된 `refresh` 부터 버린다(`arrived`·`confirm`·`left` 는 우선 보존) |
+| 로컬 아웃박스 | 보낼 사진과 메타데이터(event_id, session_id, seq, event, command_id, detected_at)를 SD 카드 디렉터리에 먼저 쓴다. 최대 20건 / 50 MB. 넘치면 가장 오래된 `refresh` 부터 버린다(`arrived`·`confirm`·`left` 는 우선 보존). 정리할 refresh 로도 자리가 안 나면 **새 이벤트를 저장 실패로 거절하고 오류 로그를 남긴다**(기존 항목은 지우지 않는다. 2026-11-02 사용자 결정). 열린 세션 동안에는 `left` 몫으로 한 칸을 비워 두므로 `left` 외의 항목은 그 칸을 쓸 수 없다 |
 | 전송 순서 | 한 번에 하나, seq 순서. 앞 건이 성공해야 다음 건 (장비 단에서 순서 보장) |
 | 재시도 대상 | 연결 실패, 타임아웃, 5xx, 429 |
-| 재시도 안 함 | 400, 401, 403, 413 (로그 남기고 버림) |
+| 재시도 안 함 | 400, 401, 403, 413, **409** (로그 남기고 버림). 409 는 `event_id_conflict`(같은 event_id 로 다른 session_id·seq·event) 와 `session_conflict`(다른 장비의 session_id) 로 장비 버그이므로 다시 보내도 같다 (2026-11-02 사용자 결정, ADR 0019 변경 기록) |
+| 접수 경로 | `POST /device/detection-jobs`. 서버에 큐가 없으면(`QUEUE_BACKEND=none`) 404 `async_ingest_disabled` (2026-11-02 사용자 결정) |
 | 성공 | 202(새 접수), 200(중복: 같은 job_id) 모두 성공으로 처리하고 파일 삭제 |
 | 백오프 | full jitter 지수 백오프: 대기 = random(0, min(60초, 2초 × 2^시도)). `Retry-After` 가 있으면 그 값 이상 |
 | 포기 기준 | `refresh`·`confirm`: 촬영 후 10분이 지나면 버림(다음 refresh 가 대신한다). `arrived`·`left`: 촬영 후 30분까지 재시도. 이후 버리고 로그 |
 | Heartbeat | 재시도 없음. 다음 주기에 보낸다 (Heartbeat 가 곧 재시도) |
 | 재부팅 | 로컬 아웃박스 파일이 남아 있으면 이어서 보낸다. 세션이 끝난 사진도 보낸다(서버 가드가 stale 로 처리) |
 
+**구현 (2026-11-02, 로컬, `device/pi_client.py` `AsyncEventRunner`, `device/outbox.py`, `PG_PROTOCOL=async`)**: 위 표 그대로. 추가·구체화한 것(ADR 0019 변경 기록): ① 기본 프로토콜은 sync(Phase 1) ② 404 도 재시도(서버에 비동기 접수가 아직 꺼진 경우 사진 보호) ③ 실행한 command_id 를 파일에 기록해 다시 찍지 않고 **절대 ack 하지 않는다**, ack 는 실행하지 않기로 한 명령만, Heartbeat 가 성공할 때까지 유지 ④ 가득 찼을 때 가장 오래된 refresh 만 정리하고, 그래도 자리가 없으면 **새 이벤트를 저장 실패로 거절**한다(2026-11-02 사용자 결정. arrived·confirm·left 는 용량 때문에 지우지 않고, 거절된 사진은 저장·전송된 것으로 기록하지 않는다). **열린 세션의 `left` 는 칸을 예약한다**(같은 날 사용자 승인): `left` 가 아닌 항목은 저장한 뒤에도 빈 칸 하나(와 사진 1장 분량의 바이트)가 남을 때만 받으므로 `arrived` 는 두 칸이 필요하고, 서버가 아는 세션의 `left` 는 논리 한도로는 거절되지 않는다. 논리 한도와 실제 디스크 오류를 구분해 `outbox/health.json` 에 영속 기록한다. `left` 의 30분 포기와 장비가 꺼진 동안의 출차는 바꾸지 않았다(ADR 위험 표) ⑤ 쓰다 만 Outbox 파일은 임시 파일 + 이름 바꾸기 + 길이·SHA-256 확인으로 보낼 것에서 제외.
+
 ### 6.11 부분 실패 검토
 
 | 실패 지점 | 남는 상태 | 결과 | 복구 |
 |---|---|---|---|
 | S3 PUT 실패 | 없음 | 503 | 장비 재시도(같은 event_id) |
-| **S3 성공 → DB INSERT 실패** | inbox 에 객체 1개 | 503 | 장비 재시도. inbox 키를 `inbox/m-<machine>/<yyyy/mm/dd>/<event_id>.<ext>` 로 **event_id 에서 결정**하므로 재시도는 같은 키를 덮어쓴다. 끝내 재시도가 없으면 수명 주기가 7일 뒤 지움 |
+| **S3 성공 → DB INSERT 실패** | inbox 에 객체 1개 | 503 | 장비 재시도. inbox 키는 `inbox/m-<machine>/<event_id>` (**2026-11-02 변경**: 날짜·확장자 없음, 자정·장비 시계·파일 형식과 무관하게 같은 키). 생성 전용 쓰기라 덮어쓰지 않고, 재시도는 같은 바이트가 이미 있음을 확인하고 진행한다(다른 바이트면 409). 끝내 재시도가 없으면 수명 주기가 7일 뒤 지움 |
 | DB INSERT 가 중복(UNIQUE 위반) | 기존 작업 | 200 + 기존 job_id | 없음 (정상) |
 | **DB commit → SQS 전송 실패** | `pending_publish` | 202 | 재전송기가 백오프로 계속 전송 |
 | SQS 전송 성공 → `queued` 갱신 실패 | `pending_publish` 인데 메시지는 있음 | 202 | Worker claim 이 `pending_publish` 도 허용. 재전송기의 중복 전송은 5분 안이면 dedup, 그 뒤면 claim 이 done 을 보고 삭제 |
@@ -779,6 +796,16 @@ Phase 1 은 지금처럼 위반 확정 사진만 저장하고 inbox 가 없다.
 | 재전송기 Pod, KEDA | 노드 안 메모리 수백 MB, 추가 비용 없음 |
 
 감수할 것: 장비 응답이 즉시 판정을 주지 않는다(LED·confirm 이 Heartbeat 한 주기 늦을 수 있음). 테이블 4개, 상태 기계, 운영 절차(redrive) 추가. End-to-End 지연은 동기보다 늘 수 있고 이를 비교 표 1행에 둔다.
+
+### 6.14.1 구현과 9단계 통합 검증 결과 (2026-11-02, 로컬)
+
+Phase 2 의 서버·장비 구현(0~8단계)을 마치고, 9단계에서 Compose 로 비동기 경로 전체를 컨테이너로 띄워 검증했다. 상세 변경 기록은 ADR 0019 "변경 기록".
+
+- **구성**: `docker-compose.phase2.yml`(프로젝트 `pg-phase2`, 포트 15432/15000/19500/19324). PostgreSQL, Moto(S3 호환, 조건부 PUT 지원), ElasticMQ(SQS 호환 FIFO + DLQ, `docker/elasticmq/elasticmq.conf`), api, Relay, Worker(실제 모델). LocalStack 최신판은 토큰이 필요하고 minio 는 받을 수 없어 쓰지 않았다. **에뮬레이터는 실제 AWS 가 아니다.**
+- **통과**: 정상 흐름, 중복·응답 유실, API 중단, 큐 전송 실패 → Relay 발행, Worker 중지·강제 종료(중복 결과 없음), 순서 뒤바뀜(`stale`), 세션 변경, DLQ + redrive, 읽을 수 없는 메시지 보관, Outbox 포화와 `health.json`, effects 동시 재실행·Worker 2 + Relay 2 버스트(중복 알림·결과 0).
+- **발견·개선**: SQS 장애 때 접수 응답이 약 40초 걸렸다. ① 접수의 SQS 전송만 빠르게 실패(재시도 1회, 연결 2초·읽기 3초) ② 접수의 실패·queued 기록이 Relay 가 쥔 행 잠금을 기다리던 것(pg_blocking_pids 로 확인)을 `SKIP LOCKED` 조건부 갱신으로 변경. 결과 4.4~5.5초, 복구 뒤 모두 `done`, 중복 0. 정상 지연은 같다.
+- **테스트(로컬 마감 시점)**: SQLite 483 통과(26 건너뜀: PostgreSQL 전용·마이그레이션 테스트가 환경변수 없이 건너뜀), PostgreSQL 509 통과(건너뜀 0), 장비 97 통과. Phase 1 동기 경로 회귀 포함.
+- **AWS 에서 다시 확인할 것**은 ADR 0019 "미해결 운영 위험" 표와 인수인계 문서 `docs/PHASE2_HANDOFF.md` 에 정리했다.
 
 ### 6.15 열린 질문
 
