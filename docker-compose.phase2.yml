@@ -1,0 +1,146 @@
+# Phase 2 integration stack (ADR 0019, step 9): the asynchronous path as separate containers, all local.
+#
+#   docker compose -f docker-compose.phase2.yml up -d --build      start (first build of `worker` is large: torch + YOLOv5)
+#   docker compose -f docker-compose.phase2.yml ps
+#   docker compose -f docker-compose.phase2.yml down -v            stop AND delete this stack's data (only this stack's)
+#
+# Everything here is isolated from the Prototype / Phase 1 environment (docker-compose.yml, docker-compose.phase1.yml):
+#   project name   pg-phase2          own network, containers and volumes
+#   database       its own postgres container + volume `pgdata_phase2`, database pg_phase2, host port 15432
+#                  (the development database on 5432 is NOT touched)
+#   images         pg-phase2-api, pg-phase2-worker (the existing parking-guardian-* image tags are not overwritten)
+#   storage        Moto (S3-compatible, in memory)         http://127.0.0.1:19500
+#   queue          ElasticMQ (SQS-compatible, in memory)   http://127.0.0.1:19324   (docker/elasticmq/elasticmq.conf)
+#   api            http://127.0.0.1:15000
+#
+# Nothing here talks to AWS: S3/SQS clients are pointed at the emulators with AWS_ENDPOINT_URL_* (boto3 reads them, no
+# code change) and the credentials are dummy local strings. Moto and ElasticMQ are emulators: they match what the code
+# relies on (conditional PUT, FIFO groups, deduplication, redrive; checked by probes), but they are not AWS.
+# Emulator state is in memory: to simulate an outage use `docker network disconnect/connect`, not stop/start.
+#
+# Services: db, s3, sqs, init (creates the bucket), api (gunicorn, `api` image target), relay (flask outbox-relay),
+# worker (flask judge-worker, `prototype` target: real YOLO models mounted from ./backend/models).
+name: pg-phase2
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://parking:phase2_local_only@db:5432/pg_phase2
+  SECRET_KEY: phase2-local-only-secret-key-0123456789
+  JWT_SECRET: phase2-local-only-jwt-secret-0123456789
+  STORAGE_BACKEND: s3
+  S3_BUCKET: pg-phase2
+  QUEUE_BACKEND: sqs
+  SQS_QUEUE_URL: http://sqs:9324/000000000000/pg-judgement.fifo
+  SQS_DLQ_URL: http://sqs:9324/000000000000/pg-judgement-dlq.fifo
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: local-test
+  AWS_SECRET_ACCESS_KEY: local-test
+  AWS_ENDPOINT_URL_S3: http://s3:5000
+  AWS_ENDPOINT_URL_SQS: http://sqs:9324
+  # api and relay never run inference (the image default `http` would need an inference service); worker overrides.
+  INFERENCE_BACKEND: mock
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: parking
+      POSTGRES_PASSWORD: phase2_local_only
+      POSTGRES_DB: pg_phase2
+    ports:
+      - "127.0.0.1:${PHASE2_DB_PORT:-15432}:5432"
+    volumes:
+      - pgdata_phase2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U parking -d pg_phase2"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  s3:
+    image: motoserver/moto:latest
+    ports:
+      - "127.0.0.1:${PHASE2_S3_PORT:-19500}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/moto-api/', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  sqs:
+    image: softwaremill/elasticmq-native:latest
+    environment:
+      JAVA_OPTS: "-Dconfig.file=/opt/elasticmq.conf"
+    volumes:
+      - ./docker/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro
+    ports:
+      - "127.0.0.1:${PHASE2_SQS_PORT:-19324}:9324"
+
+  init:
+    image: pg-phase2-api
+    build:
+      context: ./backend
+      target: api
+    command:
+      - python
+      - -c
+      - "import boto3; c = boto3.client('s3', region_name='us-east-1'); c.create_bucket(Bucket='pg-phase2'); print('bucket ready')"
+    environment: *app-env
+    depends_on:
+      s3:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: pg-phase2-api
+    environment:
+      <<: *app-env
+      # The synchronous /device/detections (Phase 1) is not used in this stack.
+      SEED_DEMO_DATA: "1"
+    ports:
+      - "127.0.0.1:${PHASE2_API_PORT:-15000}:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+      sqs:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/readyz', timeout=3)"]
+      interval: 3s
+      timeout: 4s
+      retries: 30
+      start_period: 10s
+
+  relay:
+    image: pg-phase2-api
+    command: ["flask", "outbox-relay"]
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    image: pg-phase2-worker
+    build:
+      context: ./backend
+      target: prototype
+      # The YOLOv5 source lives outside backend/ and is not in Git, so it is passed separately.
+      additional_contexts:
+        yolov5: ./yolov5
+    command: ["flask", "judge-worker"]
+    environment:
+      <<: *app-env
+      INFERENCE_BACKEND: yolo
+    volumes:
+      # Model weights are not in the image (412 MB, not in Git).
+      - ./backend/models:/models:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata_phase2:
