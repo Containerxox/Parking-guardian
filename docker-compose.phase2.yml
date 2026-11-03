@@ -117,6 +117,8 @@ services:
     image: pg-phase2-api
     command: ["flask", "outbox-relay"]
     environment: *app-env
+    # Same value as terminationGracePeriodSeconds in the Kubernetes manifest. The relay handles SIGTERM (finishes the step in hand, exits 0).
+    stop_grace_period: 15s
     depends_on:
       api:
         condition: service_healthy
@@ -137,6 +139,9 @@ services:
     volumes:
       # Model weights are not in the image (412 MB, not in Git).
       - ./backend/models:/models:ro
+    # Same value as terminationGracePeriodSeconds in the Kubernetes manifest (= SQS visibility timeout 60 s >= lease 55 s). On SIGTERM the worker
+    # finishes the message in hand, takes no new one and exits 0; an idle worker leaves after its 20-second long poll at the latest.
+    stop_grace_period: 60s
     depends_on:
       api:
         condition: service_healthy
