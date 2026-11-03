@@ -3,6 +3,7 @@ from flask import current_app
 
 from .inference import build_inference
 from .notifier import build_email_sender, build_publisher
+from .queue import build_queue
 from .storage import build_storage
 
 
@@ -11,6 +12,8 @@ def init_adapters(app) -> None:
     app.extensions["pg_storage"] = build_storage(app.config)
     app.extensions["pg_publisher"] = build_publisher(app.config)
     app.extensions["pg_email"] = build_email_sender(app.config)
+    # Phase 2 judgement queue. None unless QUEUE_BACKEND is set (default none = Phase 1 only).
+    app.extensions["pg_queue"] = build_queue(app.config)
 
 
 def warm_up_inference(app) -> None:
@@ -33,3 +36,8 @@ def publisher():
 
 def email_sender():
     return current_app.extensions["pg_email"]
+
+
+def queue():
+    """The judgement queue, or None when the app runs without one (Phase 1)."""
+    return current_app.extensions["pg_queue"]

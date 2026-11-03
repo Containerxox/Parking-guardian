@@ -77,6 +77,15 @@ class Config:
     S3_BUCKET = os.environ.get("S3_BUCKET", "")
     S3_PREFIX = os.environ.get("S3_PREFIX", "")
     AWS_REGION = os.environ.get("AWS_REGION")  # optional; boto3 also reads it from the environment
+
+    # Phase 2 judgement queue (ADR 0019, adapters/queue.py). none = no queue: the Phase 1 synchronous path.
+    # Nothing reads these yet; the ingest API (step 4) and the worker (step 5) will.
+    QUEUE_BACKEND = os.environ.get("QUEUE_BACKEND", "none")  # none | fake | sqs
+    SQS_QUEUE_URL = os.environ.get("SQS_QUEUE_URL", "")      # FIFO queue (.fifo)
+    SQS_DLQ_URL = os.environ.get("SQS_DLQ_URL", "")          # its dead-letter queue
+    # Relay recovery of stalled jobs (ADR 0019, 10단계 검토): a queued/processing job untouched this long is put back to
+    # pending_publish. Must stay below the SQS retention (4 d) and the inbox retention (7 d), above 10 minutes.
+    RELAY_STALLED_AFTER_SECONDS = int(os.environ.get("RELAY_STALLED_AFTER_SECONDS", "86400"))
     IMAGE_STORAGE_DIR = os.environ.get("IMAGE_STORAGE_DIR", str(BASE_DIR / "storage"))
     IMAGE_URL_TTL_SECONDS = int(os.environ.get("IMAGE_URL_TTL_SECONDS", "300"))
     # Only sets violations.image_expires_at when a photo is stored. Nothing deletes photos or marks them

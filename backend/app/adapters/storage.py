@@ -2,12 +2,15 @@
 
 The database stores only the object key, which is already laid out like an S3 key. Both adapters
 expose the same three methods (save / read / exists) and raise FileNotFoundError for a missing key,
-so the API code does not know which one is behind `adapters.storage()`.
+so the API code does not know which one is behind `adapters.storage()`. Phase 2 adds save_new
+(create only, never replace) for the inbox; save keeps overwriting as Phase 1 expects.
 
     STORAGE_BACKEND=local   IMAGE_STORAGE_DIR           (python wsgi.py, docker compose)
     STORAGE_BACKEND=s3      S3_BUCKET [S3_PREFIX]       (EKS; credentials come from the environment,
                                                           e.g. EKS Pod Identity, never from config)
 """
+import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +48,22 @@ class LocalImageStorage:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+
+    def save_new(self, key: str, data: bytes) -> bool:
+        """Create the object only if the key is free; False if it already exists (nothing is replaced).
+        Written to a temporary file first and hard-linked into place, so the key appears atomically with its
+        full content and exactly one of several concurrent writers wins."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_bytes(data)
+        try:
+            os.link(temp, path)
+            return True
+        except FileExistsError:
+            return False
+        finally:
+            temp.unlink(missing_ok=True)
 
     def read(self, key: str) -> bytes:
         return self._path(key).read_bytes()
@@ -93,6 +112,18 @@ class S3ImageStorage:
     def save(self, key: str, data: bytes) -> None:
         self.client.put_object(Bucket=self.bucket, Key=self._object_key(key), Body=data,
                                ContentType=sniff_image_type(data)[1])
+
+    def save_new(self, key: str, data: bytes) -> bool:
+        """Conditional PUT (If-None-Match: *): S3 refuses to replace an existing object. False if the key is
+        taken, including while another conditional write to it is in flight (409); other errors propagate."""
+        try:
+            self.client.put_object(Bucket=self.bucket, Key=self._object_key(key), Body=data,
+                                   ContentType=sniff_image_type(data)[1], IfNoneMatch="*")
+            return True
+        except Exception as exc:
+            if _s3_error_code(exc) in ("PreconditionFailed", "ConditionalRequestConflict", "412", "409"):
+                return False
+            raise
 
     def read(self, key: str) -> bytes:
         try:
