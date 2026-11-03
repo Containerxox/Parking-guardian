@@ -46,3 +46,7 @@ device/*_ncnn_model/
 backend/uploads/sample_d.jpg
 backend/uploads/sample_e.jpg
 backend/uploads/sample_f.jpg
+
+# Phase 2 integration run artifacts (local logs, one-off scripts)
+integration/phase2/out/
+integration/phase2/ab.sh
