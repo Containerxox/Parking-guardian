@@ -50,3 +50,32 @@ backend/uploads/sample_f.jpg
 # Phase 2 integration run artifacts (local logs, one-off scripts)
 integration/phase2/out/
 integration/phase2/ab.sh
+
+# Load test (loadtest/): code and docs are tracked; raw measurements, run logs, temp databases, backups and credentials are not.
+# Results and cluster snapshots of every phase
+docs/measurements/phase1/results/
+docs/measurements/phase1/eks/
+docs/measurements/phase2/results/
+docs/measurements/phase2/eks/
+loadtest/results/
+# k6 default output dir, run logs, raw points, observer timeline, abort flag
+loadtest/**/p2-out/
+loadtest/**/sends.log
+loadtest/**/points.json
+loadtest/**/timeline.jsonl
+loadtest/**/ABORT.flag
+# generated reports and baselines
+loadtest/**/p2-report.json
+loadtest/**/p2-*.csv
+loadtest/**/p1-report.json
+loadtest/**/p1-steps.csv
+loadtest/**/compare.csv
+loadtest/**/baseline*.json
+# temp databases of the local mock server
+loadtest/**/*.sqlite
+# editor/tool backups made before editing scripts
+loadtest/**/*.bak-*
+# credentials: device keys, tokens (never commit; keys are passed by environment variable only)
+*.token
+device_keys*
+DEVICE_KEYS*
