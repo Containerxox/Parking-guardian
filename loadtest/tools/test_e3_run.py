@@ -105,6 +105,34 @@ def test_snapshot_verification(tmp_path):
     assert e3.verify_snapshot(tmp_path / "없음")[0] is False
 
 
+def make_s0(tmp, taken=None, root_auto=True, child_auto=True, hpa=(2, 3), head="ad00d85", drop=None, tamper=False, no_meta_key=None, p2=True, name="s0"):
+    """p3.py snapshot 이 만드는 모양을 흉내 낸 변경 전 baseline(S0) 스냅샷."""
+    d = tmp / name
+    d.mkdir()
+    auto = {"prune": True, "selfHeal": True}
+    meta = {"taken_at": (taken or dt.datetime.now(dt.timezone.utc)).isoformat(timespec="seconds"), "config_repo_head": head, "argo_revision": head}
+    if no_meta_key:
+        meta.pop(no_meta_key)
+    files = {"pods.json": {}, "meta.json": meta,
+             "app-root.json": {"spec": {"syncPolicy": {"automated": auto if root_auto else None}}},
+             "app-parking-guardian.json": {"spec": {"syncPolicy": {"automated": auto if child_auto else None, "retry": {"limit": 5}}}},
+             "hpa-backend.json": {"spec": {"minReplicas": hpa[0], "maxReplicas": hpa[1]}}, "hpa-inference.json": {"spec": {"minReplicas": hpa[0], "maxReplicas": hpa[1]}},
+             "deploy-backend.json": {}, "deploy-inference.json": {}, "deploy-frontend.json": {}}
+    if p2:
+        files.update({"deploy-worker.json": {}, "deploy-relay.json": {}, "scaledobject-worker.json": {}, "hpa-keda-hpa-worker.json": {}})
+    sums = []
+    for n, obj in files.items():
+        t = json.dumps(obj, sort_keys=True) + "\n"
+        (d / n).write_bytes(t.encode())
+        sums.append(f"{hashlib.sha256(t.encode()).hexdigest()} *{n}")
+    (d / "SHA256SUMS").write_bytes(("\n".join(sums) + "\n").encode())
+    if tamper:
+        (d / "hpa-backend.json").write_bytes(b'{"spec":{"minReplicas":2,"maxReplicas":3},"x":1}')
+    if drop:
+        (d / drop).unlink()
+    return d
+
+
 # ============================================================================================ 3. k6 노드 선택
 def test_pick_node_chooses_node_without_inference_and_enough_cpu():
     nodes, pods = live_cluster()
@@ -431,7 +459,7 @@ def test_run_records_k6_oom_and_marks_invalid(monkeypatch, tmp_path):
     res, good = e3.run_one(ctx, 1)
     assert not good and any("OOMKilled" in r for r in res["invalid_reasons"]) and res["k6"]["oom"]
     assert res["warnings"]                                                 # Prometheus 를 못 읽으면 병목 판정 불가를 경고로 남긴다
-    assert set(res["k6"]) >= {"cpu_avg_cores", "cpu_max_cores", "throttle_ratio", "memory_max_mib", "node_busy", "assessment"}
+    assert set(res["k6"]) >= {"cpu_avg_cores", "cpu_max_cores", "memory_max_mib", "node_busy", "assessment"} and "throttling" in res
     assert set(res["guard"]) >= {"hpa_max_seen", "worker_pods_seen"}
 
 
@@ -469,7 +497,9 @@ def test_preflight_failure_in_run_creates_no_k6_pod(monkeypatch, tmp_path):
 
 # ============================================================================================ 11. dry-run 전체
 def test_dry_run_main_prints_plan_and_creates_nothing(monkeypatch, tmp_path, capsys):
-    snap = make_snapshot(tmp_path)
+    snap = make_s0(tmp_path)
+    monkeypatch.setattr(e3, "read_config_head", lambda: "ad00d85")
+    monkeypatch.setattr(e3, "enable_token_cache", lambda: None)
     fk = FakeKube()
     monkeypatch.setattr(e3, "kube", fk)                                    # kube 가 가짜라 DRY_RUN 가드는 시험 8에서 따로 확인
     monkeypatch.setattr(e3, "p3_fixed", lambda s: (False, ["FAIL x"]))
@@ -482,6 +512,7 @@ def test_dry_run_main_prints_plan_and_creates_nothing(monkeypatch, tmp_path, cap
 
 
 def test_main_refuses_stale_or_missing_snapshot_before_any_write(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(e3, "enable_token_cache", lambda: None)
     fk = FakeKube()
     monkeypatch.setattr(e3, "kube", fk)
     rc = e3.main(["1", "1", "--snap", str(tmp_path / "없음")])
