@@ -71,8 +71,11 @@ class Poller:
             self.latest = {"value": keep, "t_start": t0, "t_end": t1, "ms": int((t1 - t0) * 1000), "ok": ok, "error": err, "consecutive_failures": fails,
                            "ok_t_end": keep_t, "runs": self.runs}
 
-    def start(self):
+    def start(self, delay=0.0):
+        """delay: 첫 읽기를 이만큼 늦춘다. 여러 폴러가 같은 순간에 시작해 CPU 가 한꺼번에 치솟는 것을 막는다(주기는 그대로)."""
         def loop():
+            if delay > 0 and self.stop_event.wait(delay):
+                return
             while not self.stop_event.is_set():
                 t0 = self.clock()
                 self.poll_once()
@@ -139,6 +142,11 @@ class ReadOnlyAws:
             session = boto3.Session(profile_name=self._profile, region_name=self._region) if self._profile else boto3.Session(region_name=self._region)
             self._clients[service] = session.client(service, config=Config(connect_timeout=5, read_timeout=5, retries={"max_attempts": 1}))
         return self._clients[service]
+
+    def _warm(self):
+        """세 클라이언트를 미리 하나씩 만든다(botocore 서비스 모델 읽기 ≈ 1~2 CPU초씩). 폴러 스레드가 동시에 만들며 치솟는 것을 막는다. 네트워크 호출은 없다."""
+        for service in ("sqs", "cloudwatch", "secretsmanager"):
+            self._client(service)
 
     def sqs_attrs(self, queue_url):
         a = self._client("sqs").get_queue_attributes(QueueUrl=queue_url, AttributeNames=["All"])["Attributes"]

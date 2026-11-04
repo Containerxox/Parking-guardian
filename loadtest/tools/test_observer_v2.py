@@ -538,7 +538,7 @@ def test_samples_and_timeline_never_contain_environment_secrets(monkeypatch, tmp
 def test_threaded_pollers_and_loop_produce_regular_samples_with_real_threads(tmp_path):
     """실제 스레드·실제 시계로 짧게 돌려 본다: 틱 간격이 규칙적이고, 느린 소스(db)는 더 드물게 읽히며, 모든 표본에 소스별 시각이 있다."""
     fc = FakeCluster(delay=0.02)
-    cfg = cfg_with(fast_period_s=0.2, db_period_s=0.6, cloudwatch_period_s=0.6, secret_period_s=5)
+    cfg = cfg_with(fast_period_s=0.2, db_period_s=0.6, cloudwatch_period_s=0.6, secret_period_s=5, top_period_s=0.2, apps_period_s=0.4)
     pollers = pw.build_pollers(pw.readonly_runner(fc), pw.AwsViaRunner(pw.readonly_runner(fc)), cfg)
     for p in pollers:
         p.start()

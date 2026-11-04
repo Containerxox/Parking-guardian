@@ -16,10 +16,17 @@
 수집이 늦거나 값이 낡았을 때는 시간에 기반한 ABORT(정지·확장 실패·Pending·Relay)를 보류하고 경고로만 남긴다 - 늦은 표본이 거짓 중단을 만들지 않게.
 """
 import argparse
+import atexit
+import getpass
 import json
+import os
 import re
+import shutil
 import statistics
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -38,6 +45,7 @@ for _stream in (sys.stdout, sys.stderr):      # Windows 콘솔(cp949)에서도 �
 APP_NS, ARGO_NS, KEDA_NS = "parking-guardian", "argocd", "keda"
 WATCHED = ("backend", "relay", "worker", "inference", "frontend")
 CRITICAL_SOURCES = ("pods", "db")
+START_STAGGER_S = 0.7                       # 폴러 시작 간격(초). 12개 ≈ 8 s 안에 첫 값이 모인다
 TIME_BASED = {"POD_PENDING", "WORKER_STALL", "KEDA_NO_SCALEUP", "RELAY_STALL"}
 
 
@@ -196,6 +204,9 @@ class Config:
         self.db_period_s = 30            # kubectl exec 는 backend Pod 에서 앱을 import 하므로 자주 부르면 시험 대상(backend)을 흔든다
         self.cloudwatch_period_s = 60    # CloudWatch SQS 지표는 1분 스냅샷이라 더 자주 읽어도 같은 값이다
         self.secret_period_s = 300
+        self.apps_period_s = 60          # Argo CD 상태는 느리게 변한다(낡음 한도 120 s). 15 s 로 읽으면 kubectl 프로세스만 늘어난다
+        self.top_period_s = 30           # kubectl top 은 metrics-server 평균(해상도 낮음)이라 자주 읽을 가치가 없다
+        self.metrics_endpoint = "resource"   # 'resource' = kubelet /metrics/resource(약 25 KB), 'cadvisor' = /metrics/cadvisor(약 1.5 MB). 같은 누적 카운터
         self.cadvisor_period_s = 0       # 0 = 끔. 지속 부하 시험에서 30 으로 켠다(노드 cAdvisor 누적 카운터)
         self.call_timeout_s = 15         # 외부 호출 하나의 제한 시간
         self.exec_timeout_s = 40         # kubectl exec(DB 읽기)의 제한 시간
@@ -502,15 +513,20 @@ class WorkerLogs:
 
 
 def cadvisor_source(runner, get_pods, cfg, clock):
+    endpoint = getattr(cfg, "metrics_endpoint", "resource")
+
     def fn():
         nodes = sorted({p["node"] for p in get_pods() if p.get("node") and p["app"] in WATCHED})
         merged, t_before = {}, clock()
         for node in nodes:
             if not re.fullmatch(r"[a-z0-9.-]+", node):
                 continue
-            text = runner(["kubectl", "get", "--raw", f"/api/v1/nodes/{node}/proxy/metrics/cadvisor"], timeout=cfg.call_timeout_s)
-            merged.update(sp.parse_cadvisor(text, APP_NS))
-        return {"t": (t_before + clock()) / 2, "pods": merged}
+            text = runner(["kubectl", "get", "--raw", f"/api/v1/nodes/{node}/proxy/metrics/{endpoint}"], timeout=cfg.call_timeout_s)
+            found = sp.parse_cadvisor(text, APP_NS)
+            if not found and endpoint != "cadvisor" and any(p["node"] == node and p["app"] in WATCHED for p in get_pods()):
+                raise RuntimeError(f"{endpoint} 응답에서 {APP_NS} 컨테이너 지표를 찾지 못함 - --metrics-endpoint cadvisor 로 바꿔 보세요")
+            merged.update(found)
+        return {"t": (t_before + clock()) / 2, "pods": merged, "endpoint": endpoint}
     return fn
 
 
@@ -521,8 +537,8 @@ def build_pollers(runner, aws, cfg, clock=time.time):
     get_pods = lambda: ((pods_p.snapshot() or {}).get("value")) or []  # noqa: E731
     ps = [pods_p,
           sp.Poller("keda", lambda: parse_scaledobject(runner(["kubectl", "get", "scaledobject", "worker", "-n", APP_NS, "-o", "json"], timeout=T)), cfg.fast_period_s, "keda", clock),
-          sp.Poller("apps", lambda: parse_apps(runner(["kubectl", "get", "app", "-n", ARGO_NS, "-o", "json"], timeout=T)), cfg.fast_period_s, "apps", clock),
-          sp.Poller("top", lambda: parse_top_pods(runner(["kubectl", "top", "pods", "-n", APP_NS, "--no-headers"], timeout=T)), cfg.fast_period_s, "top", clock)]
+          sp.Poller("apps", lambda: parse_apps(runner(["kubectl", "get", "app", "-n", ARGO_NS, "-o", "json"], timeout=T)), cfg.apps_period_s, "apps", clock),
+          sp.Poller("top", lambda: parse_top_pods(runner(["kubectl", "top", "pods", "-n", APP_NS, "--no-headers"], timeout=T)), cfg.top_period_s, "top", clock)]
     if cfg.queue_url:
         ps.append(sp.Poller("sqs", lambda: aws.sqs_attrs(cfg.queue_url), cfg.fast_period_s, "sqs", clock))
         ps.append(sp.Poller("sqs_age", lambda: _sqs_age(aws, cfg.queue_name, clock), cfg.cloudwatch_period_s, "sqs_age_s", clock))
@@ -530,7 +546,8 @@ def build_pollers(runner, aws, cfg, clock=time.time):
         ps.append(sp.Poller("dlq", lambda: aws.sqs_attrs(cfg.dlq_url), cfg.fast_period_s, "dlq", clock))
     if cfg.secret_id:
         ps.append(sp.Poller("secret", lambda: aws.secret_dates(cfg.secret_id), cfg.secret_period_s, "secret", clock))
-    ps.append(sp.Poller("db", lambda: _db_sample(runner, cfg, clock), cfg.db_period_s, "db", clock))
+    if cfg.db_period_s > 0:     # 0 = 끔(kubectl exec 가 backend 에 주는 영향 H-O1 비교용)
+        ps.append(sp.Poller("db", lambda: _db_sample(runner, cfg, clock), cfg.db_period_s, "db", clock))
     if cfg.cadvisor_period_s:
         ps.append(sp.Poller("cadvisor", cadvisor_source(runner, get_pods, cfg, clock), cfg.cadvisor_period_s, "cadvisor", clock))
     if cfg.worker_logs:
@@ -559,6 +576,100 @@ def collect_sample(runner, cfg, now=None, aws=None, parallel=True):
     return sp.build_sample(pollers, clock(), cfg.fast_period_s, max_age_s=1e12, critical=())
 
 
+class KubeAuth:
+    """kubectl 마다 `aws eks get-token`(aws.exe 시작 ≈ 2 CPU초)을 실행하지 않도록, 토큰을 한 번 받아 **임시 kubeconfig** 에 담아 두고 만료 3분 전에 새로 받는다.
+    - 읽기 전용: 현재 kubeconfig 의 클러스터 주소·CA 와 exec 인증 명령(aws ... get-token)만 읽는다. 클러스터에는 아무것도 쓰지 않는다.
+    - 토큰은 사용자 전용 임시 폴더의 파일에만 있고(출력·로그·결과 파일에 쓰지 않는다) 종료 시 지운다. 수명은 EKS 기본 15분.
+    - 어떤 단계든 실패하면 try_create 가 None 을 돌려주어 원래 kubeconfig(exec 방식)로 계속한다."""
+    REFRESH_BEFORE_S = 180
+    RETRY_AFTER_FAIL_S = 30          # 갱신이 실패하면 이 시간 동안 다시 시도하지 않는다(실패한 get-token 을 호출마다 반복해 CPU 를 쓰지 않도록)
+    STALE_DIR_S = 1800               # 강제 종료로 남은 이전 임시 폴더(토큰 수명 15분)를 이 시간이 지나면 지운다
+
+    def __init__(self, runner, server, ca_data, exec_cmd):
+        self.runner, self.server, self.ca, self.exec_cmd = runner, server, ca_data, exec_cmd
+        self._remove_stale_dirs()
+        self.dir = tempfile.mkdtemp(prefix="p2w-")
+        self._restrict(self.dir)
+        self.next_try = 0.0
+        self.path = os.path.join(self.dir, "kubeconfig.json")
+        self.expires = 0.0
+        self.lock = threading.Lock()
+        self.refreshes = 0
+        atexit.register(self.close)
+        self._refresh()
+
+    @classmethod
+    def _remove_stale_dirs(cls):
+        root = Path(tempfile.gettempdir())
+        try:
+            for d in root.glob("p2w-*"):
+                if d.is_dir() and time.time() - d.stat().st_mtime > cls.STALE_DIR_S:
+                    shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _restrict(path):
+        """폴더를 현재 사용자만 접근하게 한다(최선 노력). POSIX: 0700. Windows: 상속 끊고 현재 사용자에게만 전체 권한 - 실패해도 임시 폴더의 기본 상속 권한(소유자·SYSTEM·Administrators)이 남는다."""
+        try:
+            if os.name == "nt":
+                subprocess.run(["icacls", path, "/inheritance:r", "/grant:r", f"{getpass.getuser()}:(OI)(CI)F"], capture_output=True, timeout=10)
+            else:
+                os.chmod(path, 0o700)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def try_create(cls, runner):
+        try:
+            cfg = json.loads(runner(["kubectl", "config", "view", "--minify", "--raw", "-o", "json"], timeout=20))
+            cl, us = cfg["clusters"][0]["cluster"], cfg["users"][0]["user"]
+            ex = us["exec"]
+            if os.path.basename(ex["command"]).lower().split(".")[0] != "aws" or "get-token" not in ex.get("args", []):
+                return None            # 알 수 없는 인증 방식은 건드리지 않는다
+            return cls(runner, cl["server"], cl.get("certificate-authority-data"), [ex["command"], *ex.get("args", [])])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[KubeAuth] 토큰 캐시를 쓰지 않는다(원래 방식으로 계속): {type(exc).__name__}", file=sys.stderr)
+            return None
+
+    def _refresh(self):
+        out = json.loads(self.runner(self.exec_cmd, timeout=30))
+        token, exp = out["status"]["token"], out["status"].get("expirationTimestamp")
+        self.expires = datetime.fromisoformat(exp.replace("Z", "+00:00")).timestamp() if exp else time.time() + 600
+        cluster = {"server": self.server, **({"certificate-authority-data": self.ca} if self.ca else {})}
+        doc = {"apiVersion": "v1", "kind": "Config", "current-context": "c", "clusters": [{"name": "c", "cluster": cluster}],
+               "users": [{"name": "u", "user": {"token": token}}], "contexts": [{"name": "c", "context": {"cluster": "c", "user": "u"}}]}
+        tmp = self.path + ".tmp"
+        Path(tmp).write_text(json.dumps(doc), encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+        self.refreshes += 1
+
+    def kubeconfig(self):
+        with self.lock:
+            now = time.time()
+            if now > self.expires - self.REFRESH_BEFORE_S and now >= self.next_try:
+                try:
+                    self._refresh()
+                except Exception as exc:  # noqa: BLE001  (오류 메시지는 쓰지 않는다 - 토큰이 섞일 수 있는 출력을 남기지 않는다)
+                    self.next_try = now + self.RETRY_AFTER_FAIL_S
+                    self.last_error = type(exc).__name__
+            if time.time() >= self.expires:       # 만료됐는데 갱신하지 못했다: 만료된 토큰을 보내지 않고 이 호출을 명확한 오류로 실패시킨다(소스 실패로 기록)
+                raise RuntimeError(f"kubectl 토큰이 만료됐고 갱신하지 못했다({getattr(self, 'last_error', '?')})")
+            return self.path
+
+    def wrap(self, inner):
+        def run(cmd, **kw):
+            if cmd and cmd[0] == "kubectl":
+                cmd = [cmd[0], "--kubeconfig", self.kubeconfig(), *cmd[1:]]
+            return inner(cmd, **kw)
+        return run
+
+    def close(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
 def readonly_runner(inner=None):
     """쓰기 명령은 물론 비밀을 읽는 명령도 실행하지 못하게 감싼다. 허용 목록(그 밖은 모두 거부):
     kubectl get <pods|scaledobject|app|nodes|hpa|deploy|events>, kubectl top pods|nodes, kubectl exec 는 고정된 SELECT 스크립트(POD_SCRIPT)만,
@@ -569,7 +680,7 @@ def readonly_runner(inner=None):
     def run(cmd, input=None, timeout=None):
         ok = False
         if cmd[0] == "kubectl" and len(cmd) > 2 and cmd[1] == "get":
-            ok = cmd[2] in KUBECTL_GET_KINDS or (cmd[2] == "--raw" and len(cmd) == 4 and re.fullmatch(r"/api/v1/nodes/[a-z0-9.-]+/proxy/metrics/cadvisor", cmd[3]) is not None)
+            ok = cmd[2] in KUBECTL_GET_KINDS or (cmd[2] == "--raw" and len(cmd) == 4 and re.fullmatch(r"/api/v1/nodes/[a-z0-9.-]+/proxy/metrics/(cadvisor|resource)", cmd[3]) is not None)
         elif cmd[0] == "kubectl" and len(cmd) > 2 and cmd[1] == "top":
             ok = cmd[2] in KUBECTL_TOP_KINDS
         elif cmd[0] == "kubectl" and len(cmd) > 2 and cmd[1] == "logs":
@@ -653,8 +764,10 @@ def main(argv=None):
     ap.add_argument("--duration", type=float, default=0, help="초. 0 이면 Ctrl+C 까지")
     ap.add_argument("--queue-url", default=""); ap.add_argument("--dlq-url", default=""); ap.add_argument("--secret-id", default="")
     ap.add_argument("--expect-workers", type=int); ap.add_argument("--allow-outofsync", default=""); ap.add_argument("--window-h", type=float, default=4.0)
-    ap.add_argument("--db-period", type=float, default=30.0, help="DB 읽기 주기(초). kubectl exec 가 backend Pod 에서 앱을 import 하므로 너무 자주 하면 시험 대상을 흔든다")
+    ap.add_argument("--db-period", type=float, default=30.0, help="DB 읽기 주기(초). 0 = 끔. kubectl exec 가 backend Pod 에서 앱을 import 하므로 너무 자주 하면 시험 대상을 흔든다")
     ap.add_argument("--cadvisor-period", type=float, default=0.0, help="노드 cAdvisor 누적 카운터를 읽는 주기(초). 0 = 끔. 지속 부하 시험은 30")
+    ap.add_argument("--metrics-endpoint", choices=["resource", "cadvisor"], default="resource", help="노드 지표 경로. resource = 작고(약 25 KB) 같은 누적 CPU 카운터")
+    ap.add_argument("--no-token-cache", action="store_true", help="kubectl 마다 aws eks get-token 을 실행하는 원래 방식(느리고 CPU 를 많이 쓴다)")
     ap.add_argument("--aws-mode", choices=["auto", "boto3", "cli"], default="auto"); ap.add_argument("--aws-profile", default=None)
     ap.add_argument("--no-worker-logs", action="store_true"); ap.add_argument("--since-min", type=int, default=30)
     a = ap.parse_args(argv)
@@ -667,11 +780,12 @@ def main(argv=None):
             print(json.dumps({"cadence": cadence_stats(samples), "scale_events": scale_events(samples), "backlog": backlog_episodes(samples)}, indent=1, ensure_ascii=False))
         return 0
     cfg = Config(expect_workers=a.expect_workers, allow_outofsync=tuple(x for x in a.allow_outofsync.split(",") if x), fast_period_s=a.interval, db_period_s=a.db_period,
-                 cadvisor_period_s=a.cadvisor_period)
+                 cadvisor_period_s=a.cadvisor_period, metrics_endpoint=a.metrics_endpoint)
     cfg.queue_url, cfg.dlq_url, cfg.secret_id = a.queue_url, a.dlq_url, a.secret_id
     cfg.queue_name = a.queue_url.rsplit("/", 1)[-1] if a.queue_url else ""
     cfg.worker_logs = not a.no_worker_logs
-    run = readonly_runner()
+    kube = None if a.no_token_cache or a.cmd == "keda-log" else KubeAuth.try_create(pc.default_runner)
+    run = readonly_runner(kube.wrap(pc.default_runner) if kube else None)
     if a.cmd == "keda-log":
         text = run(["kubectl", "logs", "-n", KEDA_NS, "deploy/keda-operator", f"--since={a.since_min}m", "--timestamps"], timeout=60)
         Path(a.out).write_text(text, encoding="utf-8")
@@ -695,8 +809,13 @@ def main(argv=None):
         print(json.dumps({"slots_1000m": slots["slots"], "free_m": slots["free_m"], "problems": problems, "slowest_source_ms": total_ms}, ensure_ascii=False, indent=1))
         return 2 if problems else 0
     pollers = build_pollers(run, aws, cfg)
-    for p in pollers:
-        p.start()
+    if hasattr(aws, "_warm"):
+        try:
+            aws._warm()
+        except Exception:  # noqa: BLE001  (자격 증명 문제 등은 각 소스의 첫 읽기에서 오류로 기록된다)
+            pass
+    for i, p in enumerate(pollers):
+        p.start(delay=i * START_STAGGER_S)      # 시작 순간의 CPU 급등을 분산한다. 주기와 15 s 틱 눈금은 그대로
     t_wait = time.time()
     while time.time() - t_wait < 30 and any(p.snapshot() is None for p in pollers if p.period_s <= 60):   # 첫 값이 모일 때까지 잠깐 기다린다
         time.sleep(0.5)
@@ -704,7 +823,7 @@ def main(argv=None):
     state = {"baseline": None}
 
     def make_sample(tick):
-        s = sp.build_sample(pollers, time.time(), a.interval, cfg.max_age_s, CRITICAL_SOURCES, tick)
+        s = sp.build_sample(pollers, time.time(), a.interval, cfg.max_age_s, tuple(c for c in CRITICAL_SOURCES if c != "db" or cfg.db_period_s > 0), tick)
         if state["baseline"] is None and s.get("secret"):
             state["baseline"] = s["secret"]["last_rotated"]
             w.baseline_rotated = state["baseline"]
@@ -714,6 +833,8 @@ def main(argv=None):
     finally:
         for p in pollers:
             p.stop()
+        if kube:
+            kube.close()
     return 3 if aborted else 0
 
 

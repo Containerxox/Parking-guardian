@@ -90,26 +90,55 @@ def fetch_sqlite(path, lo, hi, machines):
         con.close()
 
 
-POD_SCRIPT = '''
-import json, re, sys
-from app import create_app
-from app.extensions import db
-from sqlalchemy import text
-FORBIDDEN = re.compile(r"\\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|merge|vacuum|lock|do|set|reindex|refresh|comment|pragma|attach)\\b", re.I)
+# Backend Pod 안에서 `python -` 로 실행하는 고정 읽기 전용 스크립트(v2, 2026-11-04).
+# v1 은 매번 `create_app()` 으로 Flask 앱 전체를 올려 Pod 에서 호출당 약 1.2 CPU초를 썼다(30 s 주기에서 backend 평균 +41m, CPU request 의 20%).
+# v2 는 앱을 올리지 않고 Pod 에 이미 있는 DB_* 환경변수로 psycopg(이미지에 설치된 드라이버)에 직접 연결한다.
+#  - 비밀번호는 Pod 의 환경변수에서만 읽어 psycopg 인수로 넘기고 출력하지 않는다(Secrets Manager 호출 없음). 오류 메시지에서는 비밀번호를 지운다.
+#  - 연결: connect_timeout 5 s, 서버 쪽 statement_timeout 8 s·lock_timeout 2 s·idle_in_transaction 15 s, 세션 기본값 read only + 트랜잭션 READ ONLY.
+#  - SQL 은 v1 과 같은 가드(only_select: SELECT/WITH 로 시작, 한 문장, 쓰기 키워드 금지)를 통과해야 하고, `:lo`/`:hi` 이름 인수는 psycopg 형식으로 바꾼다.
+#  - 결과 JSON 은 v1 과 같다({질의 이름: [행 dict]}, datetime·Decimal 은 문자열). 오류는 {"error": ...} 한 줄을 stderr 로 내고 종료 코드 3 (쓰기·비밀 조회로 우회하지 않는다).
+POD_SCRIPT = r'''
+import json, os, re, sys
+FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|merge|vacuum|lock|do|set|reindex|refresh|comment|pragma|attach)\b", re.I)
 def only_select(sql):
     s = sql.strip().rstrip(";").strip()
-    assert ";" not in s and re.match(r"^(select|with)\\b", s, re.I) and not FORBIDDEN.search(re.sub(r"'[^']*'", "''", s)), "SELECT 만 허용"
+    assert ";" not in s and re.match(r"^(select|with)\b", s, re.I) and not FORBIDDEN.search(re.sub(r"'[^']*'", "''", s)), "SELECT 만 허용"
     return s
+def to_pg(sql):
+    parts = re.split(r"('(?:[^']|'')*')", sql)
+    return "".join(p.replace("%", "%%") if i % 2 else re.sub(r"(?<![:\w]):([A-Za-z_]\w*)", r"%(\1)s", p.replace("%", "%%")) for i, p in enumerate(parts))
+def conn_args():
+    e = os.environ
+    if e.get("DB_HOST"):
+        return dict(host=e["DB_HOST"], port=int(e.get("DB_PORT", "5432")), dbname=e.get("DB_NAME", "parking_guardian"), user=e.get("DB_USER", "parking"),
+                    password=e.get("DB_PASSWORD", ""), sslmode=e.get("DB_SSLMODE", "require"))
+    from urllib.parse import urlsplit, unquote, parse_qs
+    u = urlsplit(e["DATABASE_URL"])
+    return dict(host=u.hostname, port=u.port or 5432, dbname=u.path.lstrip("/"), user=unquote(u.username or ""), password=unquote(u.password or ""),
+                sslmode=(parse_qs(u.query).get("sslmode") or ["prefer"])[0])
 arg = json.loads(sys.argv[1])
-app = create_app()
-out = {}
-with app.app_context():
-    for key, sql in arg["queries"].items():
-        sql = only_select(sql)
-        params = {k: arg[k] for k in ("lo", "hi") if ":" + k in sql}
-        rows = db.session.execute(text(sql), params).mappings().all()
-        out[key] = [dict(r) for r in rows]
-    db.session.rollback()
+kw = {}
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    kw = conn_args()
+    conn = psycopg.connect(**kw, connect_timeout=5, application_name="p2-observer",
+                           options="-c default_transaction_read_only=on -c statement_timeout=8000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=15000")
+    try:
+        conn.read_only = True
+        out = {}
+        with conn.cursor(row_factory=dict_row) as cur:
+            for key, sql in arg["queries"].items():
+                sql = only_select(sql)
+                cur.execute(to_pg(sql), {k: arg[k] for k in ("lo", "hi") if ":" + k in sql})
+                out[key] = cur.fetchall()
+    finally:
+        conn.rollback()
+        conn.close()
+except Exception as exc:
+    msg = str(exc).replace(kw.get("password") or "\0", "***")[:200]
+    print(json.dumps({"error": type(exc).__name__, "message": msg}), file=sys.stderr)
+    sys.exit(3)
 print(json.dumps(out, default=str))
 '''
 

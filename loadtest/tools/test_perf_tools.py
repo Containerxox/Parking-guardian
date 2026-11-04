@@ -111,8 +111,8 @@ def test_pod_script_embeds_the_same_guard_and_sends_only_select():
     assert "only_select" in pc.POD_SCRIPT and "insert" in pc.POD_SCRIPT       # 허용 목록이 아니라 금지 목록 + SELECT 시작 검사
     ns = {}
     guard_src = pc.POD_SCRIPT.split("arg = json.loads")[0]
-    guard_src = guard_src.replace("from app import create_app\nfrom app.extensions import db\nfrom sqlalchemy import text\n", "")
     exec(guard_src, ns)                                                       # noqa: S102 - 시험용: 가드 함수만 꺼내 실행
+    assert "create_app" not in pc.POD_SCRIPT and "sqlalchemy" not in pc.POD_SCRIPT.lower()      # Flask 앱을 올리지 않는다(v2)
     ns["only_select"]("select 1")
     for bad in ("delete from x", "select 1; select 2", "update x set a=1"):
         with pytest.raises(AssertionError):
@@ -551,6 +551,9 @@ def test_watch_source_has_no_write_verbs_as_command_literals():
             consts = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
             seen.append(consts)
             if consts[0] == "kubectl":
+                if consts[1] == "config":                                    # KubeAuth 의 로컬 전용 설정 읽기(클러스터 호출 없음) 하나만 허용
+                    assert consts[1:3] == ["config", "view"] and "--minify" in consts, consts
+                    continue
                 assert consts[1] in ("get", "exec", "top", "logs"), consts
                 assert consts[2] not in ("secret", "secrets"), consts
             else:
