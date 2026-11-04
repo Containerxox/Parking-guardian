@@ -233,6 +233,19 @@ def build_report(metas, sends, rows, eval_at, on_time_s=pm.ON_TIME_S, drain_wait
     results = {e: r for e, r in all_results.items() if e not in warm}
     # 워밍업 작업의 접수→판정 지연: Worker 가 0 에서 올라올 때의 콜드 스타트 관찰값(측정 통계와 섞지 않는다)
     warm_lat = [ts(all_results[e]["created_at"]) - ts(mine_jobs[e]["received_at"]) for e in warm if e in all_results]
+    # Worker 별 첫 접수·첫 판정(워밍업 포함): 콜드 스타트 단계 분석(p2_phases.py)에 쓴다. 처리 시작 시각은 DB 에 없다
+    wdet = {}
+    for e, j in mine_jobs.items():
+        r = all_results.get(e)
+        if r is None or not j.get("worker_id"):
+            continue
+        d = wdet.setdefault(j["worker_id"], {"jobs": 0, "first_received": None, "first_result": None, "first_elapsed_ms": None, "last_result": None})
+        rt, ct = ts(j["received_at"]), ts(r["created_at"])
+        d["jobs"] += 1
+        d["first_received"] = rt if d["first_received"] is None else min(d["first_received"], rt)
+        if d["first_result"] is None or ct < d["first_result"]:
+            d["first_result"], d["first_elapsed_ms"] = ct, r["elapsed_ms"]
+        d["last_result"] = ct if d["last_result"] is None else max(d["last_result"], ct)
     warmup = {"jobs": len(warm), "judged": len(warm_lat), "status": dict(Counter(mine_jobs[e]["status"] for e in warm)), "latency_s": pm.latency_stats(warm_lat)}
     last_send = max((s["ts"] for s in mine), default=meta["t0"]) / 1000.0
     eval_too_early = eval_at < last_send + drain_wait
@@ -297,7 +310,7 @@ def build_report(metas, sends, rows, eval_at, on_time_s=pm.ON_TIME_S, drain_wait
         "run": {k: meta[k] for k in ("run_id", "tag", "scenario", "c", "scale", "ndev", "event_mode", "retry", "total")},
         "t0_epoch": t0, "t0_source": "P2START" if starts else "P2META", "start_delay_ms": max((s.get("start_delay_ms", 0) for s in (starts or [])), default=None),
         "eval_at_epoch": eval_at, "last_send_epoch": last_send, "eval_too_early": eval_too_early,
-        "attempts": len(attempts), "warmup_jobs_excluded": len(warm), "warmup": warmup, "accepted_despite_client_failure": despite,
+        "attempts": len(attempts), "warmup_jobs_excluded": len(warm), "warmup": warmup, "workers_detail": wdet, "accepted_despite_client_failure": despite,
         "steps": step_rows, "overall": pm.overall(step_rows), "completed_after_last_step": max(0, after_end),
         "job_status_counts": dict(status_counts), "stale_judged": stale, "worker_counts": dict(workers), "stages": stages,
         "notes": ["처리 시작 시각은 DB 에 저장되지 않는다: 근사 = 판정 완료 - 추론 시간",

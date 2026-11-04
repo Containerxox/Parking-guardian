@@ -490,7 +490,7 @@ def test_parsers_read_kubectl_and_aws_json():
 
 def test_collect_sample_uses_only_read_only_commands_and_never_reads_secret_values():
     calls = []
-    def inner(cmd, input=None):
+    def inner(cmd, input=None, timeout=None):
         calls.append(list(cmd))
         if cmd[:3] == ["kubectl", "get", "pods"]:
             return json.dumps({"items": []})
@@ -551,7 +551,7 @@ def test_watch_source_has_no_write_verbs_as_command_literals():
             consts = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
             seen.append(consts)
             if consts[0] == "kubectl":
-                assert consts[1] in ("get", "exec", "top"), consts
+                assert consts[1] in ("get", "exec", "top", "logs"), consts
                 assert consts[2] not in ("secret", "secrets"), consts
             else:
                 assert (consts[1], consts[2]) in pw.AWS_ALLOWED, consts

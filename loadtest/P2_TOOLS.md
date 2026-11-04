@@ -1,6 +1,7 @@
 # Phase 1 · Phase 2 비교 부하 테스트 도구 (2026-11-04 작성 — AWS 에서는 아직 실행하지 않았다)
 
 코드와 문서는 Git 으로 관리한다. 측정 결과 원본, 임시 DB, 실행 로그, 백업 파일, 장비 키·비밀번호·토큰은 저장소에 올리지 않는다(`.gitignore`, 8절). 이 도구들로 Phase 1 코드를 바꾸지 않는다(`p3.py` 만 보완, 원본은 백업).
+관측 도구 개선(2026-11-04, 스모크 반영): [P2_OBSERVABILITY.md](P2_OBSERVABILITY.md) — 표본 간격 원인, 폴러 구조, Worker 단계, CPU·SQS·KEDA 한계와 가설. 스모크 결과: [P2_SMOKE_PLAN.md](P2_SMOKE_PLAN.md) 6절.
 추가 문서: [P2_ANALYSIS_2026-11-04.md](P2_ANALYSIS_2026-11-04.md)(CPU 공정성·간헐 실패·데이터 증가량·Git 제외), [P2_SMOKE_PLAN.md](P2_SMOKE_PLAN.md)(장비 2대·사진 10장 스모크·일정·공정성).
 
 아래 도구는 전부 **로컬 모의 서버와 가짜 클러스터**로만 시험했고,
@@ -44,7 +45,8 @@ AWS·클러스터·실제 DB·실제 장비 키에 접속하지 않았다. 표�
 | `tools/perf_metrics.py` | **지표 정의(사전 등록 대상)** + 분위수·결과 분류·단계 요약 |
 | `tools/p2_collect.py` | `report`: k6 로그 + DB(SELECT 전용) → 단계별 처리량·지연·성공률·실패·미완료·Worker별 건수·대기열 추이 / `sqs`: CloudWatch SQS 지표 |
 | `tools/p1_points.py` | Phase 1 의 k6 `--out json` 점 → 같은 의미의 보고서, `compare`: Phase 1·2 단계별 나란히 |
-| `tools/p2_watch.py` | 시험 관찰자(읽기 전용) + 중단 규칙 + 사전 점검 |
+| `tools/p2_watch.py`, `p2_sampler.py` | 시험 관찰자(읽기 전용): 소스별 폴러 + 고정 주기 틱 + 중단 규칙 + 사전 점검 + 요약(`summarize`, `resources`, `keda-log`) |
+| `tools/p2_phases.py` | Worker 준비 단계(KEDA 결정·Pod·Ready·모델 로딩·첫 판정)와 근거 표시 |
 | `tools/p2_mock_server.py` | 로컬 모의 서버(시험 전용, 127.0.0.1) |
 | `tools/test_perf_tools.py`, `test_p2_integration.py`, `test_guard.py`, `conftest.py` | 단위·통합 시험, 클라우드 명령 차단 가드 |
 | `tools/p3.py` (보완) | Phase 2 비교 구성 명령 추가, Application 개수 일반화 |
@@ -116,6 +118,7 @@ python tools/p1_points.py compare --p1 <p1 dir>/p1-report.json --p2 <dir>/p2-rep
 | Relay 정지 | `pending_publish` 의 나이 | — | 30 s → **ABORT** (`RELAY_STALL`) |
 | 재시작 | Pod 재시작 수 | — | backend·relay·worker·inference·frontend 재시작 증가 → **ABORT** |
 | 관찰자 자신의 실패 | 표본 수집 오류 | — | 연속 3회 → **ABORT** (`SOURCE_ERROR`) |
+**수집 방식 개선(2026-11-04)**: 소스별 독립 폴러 + 고정 15 s 틱(표본에 소스별 시작·완료 시각, 틱 지연·누락 기록), AWS 는 boto3 읽기 전용 래퍼, 낡거나 늦은 표본에서는 시간 기반 ABORT 를 경고로 낮춘다 — 자세한 것은 [P2_OBSERVABILITY.md](P2_OBSERVABILITY.md). 지속 부하 시험에서는 `p2_watch.py run … --cadvisor-period 30` 으로 노드 cAdvisor 누적 CPU 를 같이 읽는다(읽기 전용 `kubectl get --raw`, 형식은 첫 실행에서 확인).
 이 도구는 k6·클러스터를 멈추지 않는다. ABORT 시 큰 배너와 `ABORT.flag` 를 남기고 종료 코드 3 — 사람이 k6 를 Ctrl+C 로 멈추고 시각·상태를 기록한다. 이 규칙은 시험 전에 사전 등록한다(임계 초는 `p2_watch.Config` 기본값).
 무효로 처리: ABORT 가 난 회차, k6 임계값 실패(`dropped_slots`, `other`, `4xx`), 단계 중 Pod 재시작·Argo 이상. 무효 회차도 폴더에 남긴다.
 
