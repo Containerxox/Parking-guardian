@@ -135,12 +135,27 @@ def register_cli(app) -> None:
         if once:
             click.echo(f"outbox-relay pass: {relay.run_once(clean=True)}")
             return
+        _start_relay_metrics(stop)   # observability stage 2: /metrics on METRICS_PORT + queue depth poller (never affects the loop)
         previous = install_stop_handlers(stop)
         try:
             passes = relay.run_loop(interval=interval, clean_every=clean_every)
         finally:
             restore_stop_handlers(previous)
         click.echo(f"outbox-relay stopped after {passes} pass(es)")
+
+    def _start_relay_metrics(stop: threading.Event) -> None:
+        from flask import current_app
+
+        from . import adapters
+        from .metrics import start_metrics_server
+        from .services.relay import QueueDepthPoller
+
+        port = current_app.config.get("METRICS_PORT", 0)
+        if port:
+            start_metrics_server(port)
+        queue = adapters.queue()
+        if hasattr(queue, "depths"):
+            QueueDepthPoller(queue, stop).start()
 
     @app.cli.group("jobs")
     def jobs():

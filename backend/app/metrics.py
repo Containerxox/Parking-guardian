@@ -68,6 +68,44 @@ MODEL_FIRST_INFERENCE_SECONDS = Gauge(
 MODEL_STATE = Enum("pg_inference_model_state", "Model state of this process.",
                    states=["cold", "loading", "ready", "failed"])
 
+# --- Phase 2 pipeline (relay process, observability stage 2) ---------------------------------------------
+# Exposed by `flask outbox-relay` on METRICS_PORT (PodMonitor `relay`). Labels are small fixed sets only: never a company, machine
+# or job id (cardinality). A value that is NOT available is not exported at all (no series), never exported as 0: see QueueDepthPoller.
+_PIPELINE_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600)
+
+QUEUE_MESSAGES = Gauge(
+    "pg_queue_messages",
+    "Approximate messages in the SQS queue, from GetQueueAttributes (ApproximateNumberOfMessages / ...NotVisible / ...Delayed). "
+    "queue = main (judgement FIFO) or dlq. SQS returns approximations. The relay drains the DLQ every pass, so a DLQ message that "
+    "was already moved into the database shows up as pg_jobs{status=\"dead_lettered\"}, not here. No series = the poll failed (unknown, not 0).",
+    ["queue", "state"])
+QUEUE_DEPTH_LAST_SUCCESS = Gauge(
+    "pg_queue_depth_last_success_timestamp_seconds", "Unix time of the last successful queue depth poll. Missing = never succeeded in this process.")
+SQS_API_ERRORS = Counter(
+    "pg_sqs_api_errors_total", "Failed SQS calls made by the relay, by operation (send, receive_dead_letters, get_queue_attributes).", ["operation"])
+JOBS = Gauge(
+    "pg_jobs", "Detection jobs in the database by status (pending_publish, queued, processing, dead_lettered). Counted by the relay every ~15 s. "
+    "dead_lettered stays until the job is redriven, so it is the durable DLQ signal.", ["status"])
+OLDEST_OPEN_JOB_AGE = Gauge(
+    "pg_oldest_open_job_age_seconds",
+    "Age of the oldest UNFINISHED job: now - min(detection_jobs.created_at) over status pending_publish, queued or processing "
+    "(database clock; 0 when there is none). NOT the SQS ApproximateAgeOfOldestMessage: it also covers a job that is waiting to be "
+    "published or being judged right now, and it is exact at the time of the pass instead of CloudWatch's delayed approximation.")
+OLDEST_PENDING_PUBLISH_AGE = Gauge(
+    "pg_oldest_pending_publish_age_seconds", "Age of the oldest job still pending_publish (database clock; 0 when none).")
+RELAY_PUBLISH = Counter(
+    "pg_relay_publish_total", "Jobs the relay tried to send to the queue, by outcome (success, failure). Fast-path sends by the API are not counted.",
+    ["outcome"])
+RELAY_PUBLISH_DELAY = Histogram(
+    "pg_relay_publish_delay_seconds", "Seconds from the job's creation (ingest) to the relay's successful send. Only jobs the relay published.",
+    buckets=_PIPELINE_BUCKETS)
+RELAY_LAST_PASS = Gauge(
+    "pg_relay_last_pass_timestamp_seconds", "Unix time the relay last finished a pass. A stale value means the loop is stuck.")
+for _outcome in ("success", "failure"):        # a running relay exports 0 (nothing published / nothing failed), so rate() is a real 0, not "no data"
+    RELAY_PUBLISH.labels(_outcome)
+for _operation in ("send", "receive_dead_letters", "get_queue_attributes"):
+    SQS_API_ERRORS.labels(_operation)
+
 
 def init_metrics(app) -> None:
     """Record duration, status and in-flight count for every request handled by this app."""

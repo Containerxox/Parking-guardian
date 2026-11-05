@@ -35,7 +35,7 @@ from datetime import datetime, timedelta
 from flask import current_app
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 
-from .. import adapters
+from .. import adapters, metrics
 from ..adapters.queue import QueueError, QueueMessage
 from ..extensions import db
 from ..models import (DetectionJob, DetectionResult, DeviceCommand, DeviceSession, EffectsStatus, JobStatus, Machine,
@@ -45,6 +45,9 @@ from .worker import JudgementWorker
 log = logging.getLogger(__name__)
 
 MAX_BACKOFF_SECONDS = 60
+JOB_COUNT_INTERVAL_SECONDS = 15                   # observability: database job counts are refreshed at most this often
+QUEUE_DEPTH_INTERVAL_SECONDS = 15                 # observability: SQS depth poll period (QueueDepthPoller)
+COUNTED_STATUSES = (JobStatus.PENDING_PUBLISH, JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.DEAD_LETTERED)
 PENDING_ALERT_AGE = timedelta(minutes=5)          # design 6.7: alert when pending_publish is older than 5 min
 EFFECTS_RETRY_AFTER = timedelta(minutes=5)        # design 6.7 job 3
 DEDUPLICATION_WINDOW = timedelta(minutes=5)       # SQS FIFO; redrive waits it out
@@ -95,6 +98,7 @@ class OutboxRelay:
             raise ValueError(f"stalled_after must be at least {MIN_STALLED_AFTER} (SQS deduplication window "
                              f"{DEDUPLICATION_WINDOW} plus margin): a requeue inside it would be dropped")
         self.stalled_after = stalled_after
+        self._last_job_counts = float("-inf")
 
     def _stopping(self) -> bool:
         return self._stop is not None and self._stop.is_set()
@@ -128,9 +132,28 @@ class OutboxRelay:
             return stats
         stats["oldest_pending_publish_seconds"] = self._report_old_pending()
         stats["stalled_jobs"], stats["oldest_open_job_age_seconds"] = self._report_open_jobs()
+        self._record_metrics(stats)
         if clean:
             stats["cleaned"] = self.clean_up()
         return stats
+
+    def _record_metrics(self, stats: dict) -> None:
+        """Observability only (stage 2): never raises, never changes what the pass does. The two ages come from the queries this pass
+        already ran; the per-status job counts cost one grouped query at most every JOB_COUNT_INTERVAL_SECONDS."""
+        try:
+            metrics.OLDEST_PENDING_PUBLISH_AGE.set(stats["oldest_pending_publish_seconds"])
+            metrics.OLDEST_OPEN_JOB_AGE.set(stats["oldest_open_job_age_seconds"])
+            metrics.RELAY_LAST_PASS.set(time.time())
+            if time.monotonic() - self._last_job_counts >= JOB_COUNT_INTERVAL_SECONDS:
+                self._last_job_counts = time.monotonic()
+                counts = dict(db.session.execute(select(DetectionJob.status, func.count()).where(
+                    DetectionJob.status.in_(COUNTED_STATUSES)).group_by(DetectionJob.status)).all())
+                db.session.rollback()
+                for status in COUNTED_STATUSES:
+                    metrics.JOBS.labels(status).set(counts.get(status, 0))
+        except Exception:
+            db.session.rollback()
+            log.warning("relay metrics update failed", exc_info=True)
 
     # --- 1. publish -------------------------------------------------------------------------------------
 
@@ -173,6 +196,8 @@ class OutboxRelay:
             except QueueError as exc:
                 log.warning("relay send failed (job=%s code=%s retryable=%s)", job.id, exc.code, exc.retryable)
                 _record_send_failure(job, exc, now)
+                metrics.RELAY_PUBLISH.labels("failure").inc()
+                metrics.SQS_API_ERRORS.labels("send").inc()
                 break
             try:
                 with db.session.begin_nested():
@@ -182,6 +207,8 @@ class OutboxRelay:
                 log.exception("relay could not mark job %s queued", job.id)
                 break
             sent += 1
+            metrics.RELAY_PUBLISH.labels("success").inc()
+            metrics.RELAY_PUBLISH_DELAY.observe(max(0.0, (now - as_utc(job.created_at)).total_seconds()))
         db.session.commit()
         return sent
 
@@ -293,6 +320,8 @@ class OutboxRelay:
             messages = queue.receive_dead_letters()
         except (QueueError, ValueError) as exc:
             log.warning("cannot read the DLQ: %s", exc)
+            if isinstance(exc, QueueError):
+                metrics.SQS_API_ERRORS.labels("receive_dead_letters").inc()
             return stats
         for message in messages:
             if self._stopping():
@@ -402,6 +431,46 @@ class OutboxRelay:
                                      .execution_options(synchronize_session=False)).rowcount
         db.session.commit()
         return deleted
+
+
+class QueueDepthPoller(threading.Thread):
+    """Background thread (observability only): every QUEUE_DEPTH_INTERVAL_SECONDS ask the queue for its approximate message counts and set
+    pg_queue_messages. It runs beside the relay loop and shares nothing with it, so a slow or failing SQS can never delay a relay pass.
+    A failed poll (no permission, throttling, timeout) clears the gauge series instead of leaving the last value or writing 0: Grafana then
+    shows "No data" and the alert rules see the metric as missing, which is the truth (the depth is unknown). Needs the relay role to have
+    sqs:GetQueueAttributes on the main queue and the DLQ."""
+
+    def __init__(self, queue, stop: threading.Event, interval: float = QUEUE_DEPTH_INTERVAL_SECONDS):
+        super().__init__(name="queue-depth-poller", daemon=True)
+        self.queue, self.stop_event, self.interval = queue, stop, interval
+        self._reported_error = False
+
+    def poll_once(self) -> bool:
+        try:
+            depths = self.queue.depths()
+        except QueueError as exc:
+            metrics.QUEUE_MESSAGES.clear()
+            metrics.SQS_API_ERRORS.labels("get_queue_attributes").inc()
+            if not self._reported_error:      # once per outage, not every 15 s
+                log.warning("queue depth poll failed (%s %s); pg_queue_messages is not exported until it works", exc.operation, exc.code)
+                self._reported_error = True
+            return False
+        except Exception:
+            metrics.QUEUE_MESSAGES.clear()
+            metrics.SQS_API_ERRORS.labels("get_queue_attributes").inc()
+            log.warning("queue depth poll failed unexpectedly", exc_info=True)
+            return False
+        for name, states in depths.items():
+            for state, value in states.items():
+                metrics.QUEUE_MESSAGES.labels(name, state).set(value)
+        metrics.QUEUE_DEPTH_LAST_SUCCESS.set(time.time())
+        self._reported_error = False
+        return True
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            self.poll_once()
+            self.stop_event.wait(self.interval)
 
 
 def redrive(job_ids=None, all_dead: bool = False) -> int:

@@ -165,6 +165,21 @@ class SqsJobQueue:
     def receive(self) -> list[QueueMessage]:
         return self._receive("receive", self.queue_url, 1, RECEIVE_WAIT_SECONDS)
 
+    def depths(self) -> dict:
+        """Approximate message counts of the main queue and the DLQ (observability only): {"main": {"visible", "not_visible", "delayed"}, "dlq": {...}}.
+        Uses the fast client (connect 2 s, read 3 s, one attempt) so a slow SQS cannot hold the caller; any failure raises QueueError.
+        Needs sqs:GetQueueAttributes on both queues. The DLQ part is left out when no DLQ is configured."""
+        names = ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed"]
+        out = {}
+        for label, url in (("main", self.queue_url), ("dlq", self.dlq_url)):
+            if not url:
+                continue
+            attributes = self._call("get_queue_attributes", "get_queue_attributes", client=self.fast_client,
+                                    QueueUrl=url, AttributeNames=names).get("Attributes", {})
+            out[label] = {"visible": int(attributes.get(names[0], 0)), "not_visible": int(attributes.get(names[1], 0)),
+                          "delayed": int(attributes.get(names[2], 0))}
+        return out
+
     def extend_visibility(self, receipt_handle: str, seconds: int) -> None:
         self._call("extend_visibility", "change_message_visibility", QueueUrl=self.queue_url,
                    ReceiptHandle=receipt_handle, VisibilityTimeout=seconds)
@@ -247,6 +262,19 @@ class FakeJobQueue:
         with self._lock:
             self._expire(self._clock())
             return len(self._messages)
+
+    def depths(self) -> dict:
+        """Same shape as SqsJobQueue.depths(): visible = deliverable now, not_visible = in flight (visibility timeout / held), delayed = 0."""
+        with self._lock:
+            self._maybe_fail("get_queue_attributes")
+            now = self._clock()
+            self._expire(now)
+            self._redrive_exhausted(now)
+
+            def split(items):
+                hidden = sum(1 for m in items if m.visible_at is not None and m.visible_at > now)
+                return {"visible": len(items) - hidden, "not_visible": hidden, "delayed": 0}
+            return {"main": split(self._messages), "dlq": split(self._dead)}
 
     def send(self, job_id: uuid.UUID, machine_id: int, fast: bool = False) -> str:
         with self._lock:
