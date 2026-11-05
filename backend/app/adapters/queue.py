@@ -68,9 +68,18 @@ class QueueMessage:
     message_id: str
     group_id: str | None
     body: str
+    sent_at: datetime | None = None   # SQS SentTimestamp (first send; a redelivery keeps it). None when unknown. Observability only.
 
 
 # --- SQS --------------------------------------------------------------------------------------------------
+
+def _sent_at(attributes: dict) -> datetime | None:
+    """SentTimestamp is epoch milliseconds as a string. Missing or unreadable -> None (the caller then records no queue wait)."""
+    try:
+        return datetime.fromtimestamp(int(attributes["SentTimestamp"]) / 1000, tz=timezone.utc)
+    except (KeyError, ValueError, TypeError, OverflowError, OSError):
+        return None
+
 
 class SqsJobQueue:
     """SQS FIFO queue. `client` is injectable for tests; otherwise boto3 is imported on first use, so the
@@ -152,14 +161,14 @@ class SqsJobQueue:
     def _receive(self, operation: str, url: str, max_messages: int, wait_seconds: int) -> list[QueueMessage]:
         response = self._call(operation, "receive_message", QueueUrl=url, MaxNumberOfMessages=max_messages,
                               WaitTimeSeconds=wait_seconds,
-                              MessageSystemAttributeNames=["ApproximateReceiveCount", "MessageGroupId"])
+                              MessageSystemAttributeNames=["ApproximateReceiveCount", "MessageGroupId", "SentTimestamp"])
         messages = []
         for raw in response.get("Messages", []):
             attributes = raw.get("Attributes", {})
             messages.append(QueueMessage(
                 job_id=_job_id_from(raw.get("Body", "")), receipt_handle=raw["ReceiptHandle"],
                 receive_count=int(attributes.get("ApproximateReceiveCount", "1")), message_id=raw["MessageId"],
-                group_id=attributes.get("MessageGroupId"), body=raw.get("Body", "")))
+                group_id=attributes.get("MessageGroupId"), body=raw.get("Body", ""), sent_at=_sent_at(attributes)))
         return messages
 
     def receive(self) -> list[QueueMessage]:
@@ -321,7 +330,7 @@ class FakeJobQueue:
     def _to_message(stored: _Stored) -> QueueMessage:
         return QueueMessage(job_id=_job_id_from(stored.body), receipt_handle=stored.receipt_handle,
                             receive_count=stored.receive_count, message_id=stored.message_id,
-                            group_id=stored.group_id, body=stored.body)
+                            group_id=stored.group_id, body=stored.body, sent_at=stored.enqueued_at)
 
     def _find(self, receipt_handle: str, operation: str) -> _Stored:
         now = self._clock()

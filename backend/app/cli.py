@@ -106,6 +106,8 @@ def register_cli(app) -> None:
 
         if adapters.queue() is None:
             raise click.ClickException("QUEUE_BACKEND=none: there is no queue to work on.")
+        if not until_empty and not max_messages:   # the long-running worker only (not one-off drains or tests)
+            _start_metrics_server()   # observability stage 3: /metrics on METRICS_PORT before the (slow) model load, so state "loading" is visible
         worker = JudgementWorker()
         previous = install_stop_handlers(worker.stop)   # before the (slow) model load, so a SIGTERM during it is honoured too
         click.echo(f"judge-worker {worker.worker_id} started")
@@ -142,6 +144,15 @@ def register_cli(app) -> None:
         finally:
             restore_stop_handlers(previous)
         click.echo(f"outbox-relay stopped after {passes} pass(es)")
+
+    def _start_metrics_server() -> None:
+        from flask import current_app
+
+        from .metrics import start_metrics_server
+
+        port = current_app.config.get("METRICS_PORT", 0)
+        if port:
+            start_metrics_server(port)
 
     def _start_relay_metrics(stop: threading.Event) -> None:
         from flask import current_app

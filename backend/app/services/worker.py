@@ -37,6 +37,7 @@ import logging
 import re
 import socket
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -44,7 +45,7 @@ from datetime import datetime, timedelta
 from flask import current_app
 from sqlalchemy import and_, or_, select, update
 
-from .. import adapters
+from .. import adapters, metrics
 from ..adapters.inference import InvalidImageError
 from ..adapters.queue import QueueError, QueueMessage
 from ..adapters.storage import build_image_key, sniff_image_type
@@ -161,6 +162,8 @@ class JudgementWorker:
         self.clock = clock
         self.lease = timedelta(seconds=lease_seconds)
         self.stop = stop if stop is not None else threading.Event()
+        self._claimed_at = None
+        self._committed = None
 
     # --- life cycle ------------------------------------------------------------------------------------
 
@@ -220,18 +223,70 @@ class JudgementWorker:
         return self.process(messages[0])
 
     def process(self, message: QueueMessage) -> str:
-        """Returns what happened: done | stale | already | busy | rejected | retry | isolated | lost_claim."""
+        """Returns what happened: done | stale | already | busy | rejected | retry | isolated | lost_claim.
+        Observability (stage 3) wraps _process(); it only reads what happened and never changes it."""
+        self._claimed_at = None      # perf_counter value once this process() won the claim
+        self._committed = None       # Applied once the verdict transaction has committed
+        self._observe_queue_wait(message)
+        outcome = self._process(message)
+        self._record_outcome(outcome)
+        return outcome
+
+    def _observe_queue_wait(self, message: QueueMessage) -> None:
+        """SQS SentTimestamp -> now, first delivery only: a redelivery's wait would include the failed attempts."""
+        if message.receive_count != 1:
+            return
+        try:
+            if message.sent_at is None:
+                metrics.WORKER_TIMING_SKIPPED.labels("queue_wait", "missing").inc()
+                return
+            wait = (self.clock() - as_utc(message.sent_at)).total_seconds()
+            if wait < 0:
+                metrics.WORKER_TIMING_SKIPPED.labels("queue_wait", "negative").inc()
+            else:
+                metrics.QUEUE_WAIT.observe(wait)
+        except Exception:
+            log.debug("queue wait not recorded", exc_info=True)
+
+    def _observe_e2e(self, received_at: datetime | None) -> None:
+        """Server-side E2E: ingest (received_at) -> now, called right AFTER the verdict transaction committed and only once per job
+        (the fencing in _apply lets exactly one attempt commit; a redelivery finds the job finished and returns 'already')."""
+        try:
+            if received_at is None:
+                metrics.WORKER_TIMING_SKIPPED.labels("e2e", "missing").inc()
+                return
+            elapsed = (self.clock() - received_at).total_seconds()
+            if elapsed < 0:
+                metrics.WORKER_TIMING_SKIPPED.labels("e2e", "negative").inc()
+            else:
+                metrics.JOB_E2E.observe(elapsed)
+        except Exception:
+            log.debug("e2e not recorded", exc_info=True)
+
+    def _record_outcome(self, outcome: str) -> None:
+        try:
+            if outcome == "retry" and self._committed is not None:
+                outcome = "effects_retry"      # the verdict is already stored; only the evidence photo or notification failed
+            metrics.WORKER_MESSAGES.labels(outcome).inc()
+            if self._claimed_at is not None:
+                metrics.WORKER_PROCESS_SECONDS.labels(outcome).observe(time.perf_counter() - self._claimed_at)
+        except Exception:
+            log.debug("outcome not recorded", exc_info=True)
+
+    def _process(self, message: QueueMessage) -> str:
         if message.job_id is None:
             return self._isolate(message, "unreadable message body")
         job = db.session.get(DetectionJob, message.job_id)
         if job is None:
             return self._isolate(message, "no such job")
         job_id = job.id
+        received_at = as_utc(job.received_at)
         db.session.rollback()   # end the read transaction before anything slow
 
         attempt = self._claim(job_id)
         if attempt is None:
             return self._not_claimed(job_id, message)
+        self._claimed_at = time.perf_counter()
 
         try:
             image = adapters.storage().read(job.s3_key)
@@ -263,6 +318,8 @@ class JudgementWorker:
             return "retry"
         if applied is None:
             return "lost_claim"   # another worker owns the job now; it will delete the message
+        self._committed = applied          # the commit in _apply succeeded: only now does a verdict count
+        self._observe_e2e(received_at)
 
         if applied.created:
             try:

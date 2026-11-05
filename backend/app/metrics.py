@@ -107,6 +107,46 @@ for _operation in ("send", "receive_dead_letters", "get_queue_attributes"):
     SQS_API_ERRORS.labels(_operation)
 
 
+# --- Phase 2 judgement worker (`flask judge-worker`, observability stage 3) ------------------------------
+# One message at a time per process, so the default registry is enough. Labels are small fixed sets: never a company, machine, job
+# or event id. Model readiness is NOT duplicated here: pg_inference_model_state (above) is set by the same adapter the worker uses.
+_WORKER_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 60, 120, 300, 600)
+WORKER_MESSAGES = Counter(
+    "pg_worker_messages_total",
+    "Queue messages the worker finished handling, by outcome. done/stale = the verdict was COMMITTED to the database (counted after the commit); "
+    "effects_retry = verdict committed but the evidence photo or notification failed (redelivery redoes only that part); "
+    "rejected = no verdict (missing or invalid image); retry = failed before a verdict was stored (storage, inference or database "
+    "error; the message stays in the queue, after maxReceiveCount it goes to the DLQ); already = redelivery of a finished job; busy = another worker "
+    "holds the lease; lost_claim = lease lost, result dropped; isolated = unreadable message given back.",
+    ["outcome"])
+WORKER_PROCESS_SECONDS = Histogram(
+    "pg_worker_process_seconds",
+    "Seconds from winning the claim to the end of the handling, for claimed messages only (image read, inference, verdict transaction, "
+    "effects, delete), by outcome (done, stale, rejected, retry, effects_retry, lost_claim). Inference stages are in pg_inference_stage_seconds.",
+    ["outcome"], buckets=_WORKER_BUCKETS)
+JOB_E2E = Histogram(
+    "pg_job_e2e_seconds",
+    "SERVER-side end to end seconds: from detection_jobs.received_at (API server clock when the photo was accepted) to the worker's clock right "
+    "after the verdict transaction committed. Observed once per job (done and stale), never for a redelivery or a rolled-back attempt. "
+    "Not the device-side time (the device clock is not trusted) and it ends at the commit, before effects and the SQS delete.",
+    buckets=_WORKER_BUCKETS)
+QUEUE_WAIT = Histogram(
+    "pg_queue_wait_seconds",
+    "Seconds from the SQS SentTimestamp of a message to the worker receiving it, first delivery only (ApproximateReceiveCount = 1). AWS and pod "
+    "clocks differ by a little, so values are approximate (SQS is second-precise at best). Includes time spent behind the machine's earlier message "
+    "in the FIFO group. Excludes the wait before the first send (Relay-published jobs are in pg_relay_publish_delay_seconds).",
+    buckets=_WORKER_BUCKETS)
+WORKER_TIMING_SKIPPED = Counter(
+    "pg_worker_timing_skipped_total",
+    "Timing observations not recorded, by metric (e2e, queue_wait) and reason (missing = timestamp unknown, negative = clock skew made it < 0).",
+    ["metric", "reason"])
+for _outcome in ("done", "stale", "effects_retry", "rejected", "retry", "already", "busy", "lost_claim", "isolated"):
+    WORKER_MESSAGES.labels(_outcome)     # a running worker exports 0 so rate() is a real 0, not "no data"
+for _metric in ("e2e", "queue_wait"):
+    for _reason in ("missing", "negative"):
+        WORKER_TIMING_SKIPPED.labels(_metric, _reason)
+
+
 def init_metrics(app) -> None:
     """Record duration, status and in-flight count for every request handled by this app."""
 

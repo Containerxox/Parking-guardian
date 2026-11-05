@@ -91,7 +91,7 @@ def test_receive_long_polls_one_message_and_reports_the_receive_count(sqs):
         "MessageId": "m-1", "ReceiptHandle": "rh-1", "Body": message_body(JOB),
         "Attributes": {"ApproximateReceiveCount": "2", "MessageGroupId": "m-7"}}]}, {
         "QueueUrl": QUEUE_URL, "MaxNumberOfMessages": 1, "WaitTimeSeconds": 20,
-        "MessageSystemAttributeNames": ["ApproximateReceiveCount", "MessageGroupId"]})
+        "MessageSystemAttributeNames": ["ApproximateReceiveCount", "MessageGroupId", "SentTimestamp"]})
     assert queue.receive() == [QueueMessage(job_id=JOB, receipt_handle="rh-1", receive_count=2, message_id="m-1",
                                             group_id="m-7", body=message_body(JOB))]
 
