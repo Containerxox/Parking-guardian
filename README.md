@@ -144,7 +144,6 @@ SQS --> Judge Worker: 작업 선점 -> YOLO 판정 -> 사건 묶기 -> 위반 �
 ├─ device/                  Raspberry Pi 클라이언트와 PC 시뮬레이터
 ├─ docker/                  PostgreSQL 초기화, ElasticMQ 설정
 ├─ integration/phase2/      Phase 2 통합 시험 스크립트
-├─ loadtest/                k6 부하 시험 시나리오와 실행 도구
 ├─ docs/                    ADR, 설계·API 문서, 측정 기록
 ├─ docker-compose.yml           Prototype 구조 (DB + Backend + Frontend)
 ├─ docker-compose.phase1.yml    Phase 1 오버레이 (API와 추론 서비스 분리)
