@@ -31,10 +31,8 @@ device/*_ncnn_model/
 *.pem
 *.key
 
-# Extra sample photos added locally (16 MB, not committed by decision 2026-10-25)
-backend/uploads/sample_d.jpg
-backend/uploads/sample_e.jpg
-backend/uploads/sample_f.jpg
+# backend/uploads/: 로컬 샘플 사진 폴더 (전부 Git 에서 제외)
+backend/uploads/
 
 # Phase 2 integration run artifacts (local logs, one-off scripts)
 integration/phase2/out/
