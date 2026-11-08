@@ -7,6 +7,12 @@ roadmap.md
 # docs: 전부 로컬 전용. 예외 없이 Git 에 올리지 않는다.
 docs/
 
+# 작업 과정에서 만든 중간 문서 (로컬 전용). 대체된 AI 설계 초안과 부하 시험 계획·분석 메모
+AI_SYSTEM_DESIGN.md
+loadtest/*.md
+!loadtest/README.md
+!loadtest/P2_TOOLS.md
+
 # YOLOv5 source (external, pinned separately)
 yolov5/
 
@@ -62,3 +68,31 @@ loadtest/**/*.bak-*
 *.token
 device_keys*
 DEVICE_KEYS*
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs, coverage, temporary and backup files
+*.log
+*.tmp
+*.bak
+*.bak-*
+.coverage
+htmlcov/
+coverage/
+
+# Python build output and virtual environments
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
